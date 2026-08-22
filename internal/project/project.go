@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"os"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/joyautomation/nautilus/eip"
 	nio "github.com/joyautomation/nautilus/io"
+	"github.com/joyautomation/nautilus/lang/st"
 	"github.com/joyautomation/nautilus/runtime"
 	"github.com/joyautomation/nautilus/server"
 	"github.com/joyautomation/nautilus/sparkplug"
@@ -333,7 +333,23 @@ func (p *Project) Sparkplug(rt *runtime.Runtime) (*sparkplug.Node, error) {
 	return sparkplug.New(rt, cfg, opts...)
 }
 
-var programRe = regexp.MustCompile(`(?mi)^\s*PROGRAM\b`)
+// hasProgramDecl reports whether src contains a PROGRAM declaration,
+// deciding by lexical token rather than raw text: a comment or string
+// literal containing the word "program" (e.g. a block comment that reads
+// "program; the site program owns...") must not count, or a library file
+// gets misidentified as a program and silently dropped from the composed
+// library set — surfacing later as spurious "unknown type" errors for
+// whatever it declared. lang/st's lexer already strips (* ... *) and //
+// comments and tokenizes string literals separately from keywords, so a
+// single PROGRAM token scan is both cheap and correct without a full parse.
+func hasProgramDecl(src []byte) bool {
+	for _, tok := range st.Lex(string(src)) {
+		if tok.Type == st.TokenProgram {
+			return true
+		}
+	}
+	return false
+}
 
 // ReadManifest decodes a manifest and stops there — no programs compiled, no
 // driver constructed, nothing opened beyond the manifest and its tag files.
@@ -462,7 +478,7 @@ func Load(fsys fs.FS, name string) (*Project, error) {
 		if err != nil {
 			return "", fmt.Errorf("task program %q: %w", t.Program, err)
 		}
-		if !programRe.Match(src) {
+		if !hasProgramDecl(src) {
 			return "", fmt.Errorf("%s has no PROGRAM declaration", t.Program)
 		}
 		return string(src), nil
@@ -549,7 +565,7 @@ func libraries(fsys fs.FS) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !programRe.Match(src) {
+		if !hasProgramDecl(src) {
 			libs = append(libs, string(src))
 		}
 	}
