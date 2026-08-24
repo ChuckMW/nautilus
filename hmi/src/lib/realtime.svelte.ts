@@ -51,6 +51,27 @@ export class TrendBuffer {
 	}
 }
 
+/**
+ * The half of `RealtimeClient` that everything downstream of a frame
+ * actually uses — `useTrend`, `AlarmClient`, any consumer that wires itself
+ * to frames rather than being handed one.
+ *
+ * It is an interface rather than the class so an app can put its OWN object
+ * in front of the client: the Pomona HMI swaps the underlying connection
+ * whenever the open screen changes what it needs (`?tags=`, fixed at
+ * connect), and hands the kit a stable facade that forwards to whichever
+ * connection is live. Trend buffers are keyed on this identity, so a facade
+ * is what keeps a sparkline's history across that swap.
+ */
+export interface FrameSource<T> {
+	/** The most recent frame, or null before the first one. */
+	readonly frame: T | null;
+	/** Subscribe to frames. Returns an unsubscribe function. */
+	onFrame(cb: (frame: T) => void): () => void;
+	/** Subscribe to (re)opens — the backfill hook. Returns an unsubscribe. */
+	onOpen(cb: () => void): () => void;
+}
+
 export interface RealtimeOptions<T> {
 	/** SSE endpoint. Default `/api/stream`. */
 	url?: string;
@@ -84,6 +105,13 @@ export interface RealtimeOptions<T> {
 	 * churn a full frame is ~280 kB and a delta ~17 kB — about 17× less on
 	 * the wire, per client, per tick. That is the difference between one
 	 * wall screen and a shift's worth of tablets.
+	 *
+	 * It also asks the controller to gate the NON-tag blocks the same way
+	 * (`?blocks=delta`): the scan diagnostics, driver status and alarm
+	 * counts are sent only when they change, and the merge puts the last
+	 * known one back on every frame. That is the floor a tag filter could
+	 * never get under — on the same controller, ~18 kB a frame, 4.35 MB a
+	 * minute for a client subscribed to nothing at all.
 	 *
 	 * Falls back to plain pass-through automatically against a controller
 	 * that does not implement deltas (its frames carry no `seq`), so
@@ -123,6 +151,26 @@ export class RealtimeClient<T = unknown> {
 	 */
 	resyncs = $state(0);
 
+	/**
+	 * Frames received on this client since it was created, across every
+	 * reconnect — unlike `seq`, which is the CONNECTION's counter and
+	 * restarts at 1 each time the stream reopens.
+	 */
+	frames = $state(0);
+	/**
+	 * Payload characters received since this client was created: the sum of
+	 * every `data:` line's length, excluding SSE framing and HTTP headers.
+	 *
+	 * It exists to be measured. "Filtering the subscription made the screen
+	 * cheaper" is a claim about bytes, and the alternative to counting them
+	 * here is reading a browser network panel by hand — which cannot
+	 * separate two streams on one page, and cannot be asserted on at all.
+	 * Tag names and values are ASCII in every nautilus frame, so characters
+	 * and bytes are the same number in practice; treat it as approximate if
+	 * yours are not.
+	 */
+	bytesReceived = $state(0);
+
 	#url: string;
 	#freshnessMs: number;
 	#reconnectMs: number;
@@ -154,6 +202,16 @@ export class RealtimeClient<T = unknown> {
 	}
 
 	/**
+	 * The glob patterns this client subscribed to, or `[]` for the
+	 * unfiltered stream. Fixed at construction — the controller applies
+	 * `?tags=` per connection, so CHANGING a subscription means opening a
+	 * new client, not mutating this one.
+	 */
+	get tagFilter(): string[] {
+		return [...this.#tags];
+	}
+
+	/**
 	 * The stream URL actually opened, with the subscription parameters this
 	 * client was configured with. Exposed because "why is my screen empty"
 	 * is almost always answered by reading it.
@@ -161,7 +219,17 @@ export class RealtimeClient<T = unknown> {
 	get streamUrl(): string {
 		const qs = new URLSearchParams();
 		if (this.#tags.length) qs.set('tags', this.#tags.join(','));
-		if (this.#delta) qs.set('delta', '1');
+		if (this.#delta) {
+			qs.set('delta', '1');
+			// …and gate the non-tag blocks too (scan diagnostics, driver
+			// status, alarm counts — ~18 kB of every frame on the
+			// controller this was measured on). `mergeDelta` retains the
+			// last one it saw of each, so consumers still get a complete
+			// frame. Safe to ask an older controller: it ignores the
+			// parameter and keeps sending every block every tick, which
+			// merges to the same thing.
+			qs.set('blocks', 'delta');
+		}
 		const q = qs.toString();
 		if (!q) return this.#url;
 		return this.#url + (this.#url.includes('?') ? '&' : '?') + q;
@@ -306,6 +374,8 @@ export class RealtimeClient<T = unknown> {
 		es.onmessage = (ev) => {
 			this.lastMessageAt = Date.now();
 			this.connected = true;
+			this.frames++;
+			this.bytesReceived += ev.data.length;
 			let f: T;
 			try {
 				f = this.#parse(ev.data);
