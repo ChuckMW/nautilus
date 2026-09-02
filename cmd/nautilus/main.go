@@ -49,6 +49,10 @@ Usage:
   nautilus sparkplug <cmd> Sparkplug B host tools: import (listen to a group
                           and generate types + manifest + tag file), browse,
                           and tags (re-derive the tag file, no broker).
+  nautilus modbus <cmd>   Modbus TCP tools: import (device map → manifest +
+                          tag file, offline), browse (read a live register
+                          range raw + decoded), serve (bench slave for a
+                          manifest), tags (re-derive the tag file).
   nautilus tags <cmd>     Generate a tag file from a spreadsheet export
                           (import-csv). Commit the output and compose it
                           with tag-files:.
@@ -99,6 +103,8 @@ func main() {
 		os.Exit(runEIP(os.Args[2:]))
 	case "sparkplug":
 		os.Exit(runSparkplug(os.Args[2:]))
+	case "modbus":
+		os.Exit(runModbus(os.Args[2:]))
 	case "tags":
 		os.Exit(runTags(os.Args[2:]))
 	case "alarms":

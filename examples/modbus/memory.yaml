@@ -1,0 +1,30 @@
+# The same project on the loopback driver — logic-only, no field bus:
+#   nautilus check -m memory.yaml .
+#   nautilus test  -m memory.yaml .
+# This is the manifest to use on a build whose project loader does not yet
+# know `driver: {type: modbus}` (see nautilus.yaml's note), and the shape
+# `*_test.yaml` runs against either way: `given:` writes the driver's input
+# image directly, so no socket is ever involved.
+name: modbus-plant
+
+server:
+  addr: "localhost:8080"
+
+tasks:
+  - program: plant.st
+    scan: 250ms
+
+tag-files:
+  - tags/modbus.yaml
+
+# CFG_HeatersOn is nautilus.yaml-only: the modbus driver's `enable:` is its
+# one consumer, and with no driver here it would just be a dead-tag warning.
+tags:
+  - { name: TspCmd, role: setpoint, init: 180.0, unit: "degC", desc: "Operator temperature setpoint, both zones" }
+  - { name: FanCmd, role: setpoint, init: 30.0, unit: "Hz", desc: "Operator fan speed command" }
+  - { name: AvgPPM, role: state, init: 0.0, unit: "ppm", desc: "Average of the analyser channels" }
+  - { name: TErr, role: state, init: 0.0, unit: "degC", desc: "Zone A control error" }
+  - { name: HighAlm, role: state, init: false, desc: "Average concentration high" }
+
+driver:
+  type: memory

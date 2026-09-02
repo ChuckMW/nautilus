@@ -1,0 +1,14 @@
+source FAN: 2 blocks
+  FC3 holding 2000..2001 (2 registers, class fast): FAN_Running@2000, FAN_Status@2000, FAN_Spv@2001
+  FC3 holding 2101..2101 (1 registers, class fast): FAN_Ssp@2101
+source GAS: 2 blocks
+  FC3 holding 0..7 (8 registers, class default): GAS_CH1@0, GAS_CH2@2, GAS_CH3@4, GAS_CH4@6
+  FC4 input 0..1 (2 registers, class default): GAS_Flow@0
+source TC_A: 3 blocks
+  FC3 holding 0..9 (10 registers, class slow): TC_A_Tpv@0, TC_A_MV@8
+  FC3 holding 262..263 (2 registers, class slow): TC_A_Tsp@262
+  FC2 discrete 12..12 (1 coils, class slow): TC_A_AlmH@12
+source TC_B: 3 blocks
+  FC3 holding 0..9 (10 registers, class slow): TC_B_Tpv@0, TC_B_MV@8
+  FC3 holding 262..263 (2 registers, class slow): TC_B_Tsp@262
+  FC2 discrete 12..12 (1 coils, class slow): TC_B_AlmH@12
