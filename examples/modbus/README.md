@@ -14,13 +14,6 @@ nautilus modbus serve --manifest modbus_manifest.yaml --values seed.json
 nautilus run .                               # poll the "devices" for real
 ```
 
-> **Branch note:** `driver: {type: modbus}` needs the modbus driver case in
-> the project loader (C1 in `docs/design/modbus.md` §8). On a build without
-> it, `nautilus check .` and `nautilus run .` fail on the driver type —
-> that is the fail-safe, not a broken example. Everything logic-only works
-> today through `-m memory.yaml`, and the generated manifest already
-> validates and plans (`nautilus modbus import --plan`).
-
 ## The workflow
 
 **1. Import — offline.** `nautilus modbus import --map devices.yaml` emits

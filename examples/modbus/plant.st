@@ -16,6 +16,7 @@ VAR_EXTERNAL
     FAN_Ssp     : REAL;
     FAN_Control : REAL;
     (* this project's own tags — nautilus.yaml *)
+    CFG_HeatersOn : BOOL;
     TspCmd  : REAL;
     FanCmd  : REAL;
     AvgPPM  : REAL;
@@ -30,7 +31,14 @@ HighAlm := AvgPPM > 250.0;
    x10 scaling on the way to the gateway. *)
 TC_A_Tsp := TspCmd;
 TC_B_Tsp := TspCmd;
-TErr := TspCmd - TC_A_Tpv;
+
+(* CFG_HeatersOn is also the manifest's `enable:` tag — false parks the
+   TC sources, so the zone error is meaningless while they're off. *)
+IF CFG_HeatersOn THEN
+    TErr := TspCmd - TC_A_Tpv;
+ELSE
+    TErr := 0.0;
+END_IF;
 
 FAN_Ssp := FanCmd;
 IF HighAlm THEN

@@ -10,10 +10,6 @@
 #   nautilus run .                                poll them (requires the
 #                                                 modbus driver in `run`)
 #
-# NOTE: this manifest needs `driver: {type: modbus}` support in the project
-# loader (branch `modbus`, C1 in docs/design/modbus.md §8). On a build
-# without it, `nautilus check .` fails on the driver type — use
-# `-m memory.yaml` for everything logic-only in the meantime.
 name: modbus-plant
 
 server:
