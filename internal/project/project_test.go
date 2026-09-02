@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/joyautomation/nautilus/eip"
+	"github.com/joyautomation/nautilus/modbus"
 	"github.com/joyautomation/nautilus/runtime"
 	sphost "github.com/joyautomation/nautilus/sparkplug/host"
 )
@@ -170,7 +171,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad role", "tasks:\n  - program: program.fbd\ntags:\n  - { name: X, role: writable, init: 1.0 }\n", "role must be"},
 		{"setpoint without init", "tasks:\n  - program: program.fbd\ntags:\n  - { name: S, role: setpoint }\n", "needs init"},
 		{"missing program", "tasks:\n  - program: nope.ld\n", "nope.ld"},
-		{"unknown driver", "tasks:\n  - program: program.fbd\ndriver: { type: modbus }\n", "Go tier"},
+		{"unknown driver", "tasks:\n  - program: program.fbd\ndriver: { type: opcua }\n", "Go tier"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -507,5 +508,169 @@ driver:
 				t.Fatalf("err = %v, want containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// The modbus driver builds from the manifest tier with no device anywhere —
+// the guarantee `nautilus check` and `nautilus build` rest on — the config
+// keys are eip's reused wholesale, the driver's synthesized __Online
+// companion satisfies a program that interlocks on it, and DriverStatus
+// picks the driver up so /api/drivers reports the sources.
+func TestLoadModbusDriver(t *testing.T) {
+	files := fstest.MapFS{
+		"nautilus.yaml": &fstest.MapFile{Data: []byte(`
+name: xbox
+tasks:
+  - program: program.st
+    scan: 50ms
+tags:
+  - { name: FTIR_CO, role: input, unit: "ppm" }
+  - { name: FTIR__Online, role: input }
+  - { name: FTIR_Sp, role: output }
+  - { name: FTIR_En, role: output, init: true }
+driver:
+  type: modbus
+  manifest: modbus_manifest.yaml
+  scan-rate: 500ms
+  scan-classes: { slow: 2500ms }
+  tag-classes: { slow: ["FTIR_CO"] }
+`)},
+		// The program guards its reads on the companion — the shape
+		// `nautilus check` wants for every modbus tag.
+		"program.st": &fstest.MapFile{Data: []byte(`PROGRAM Main
+VAR_EXTERNAL FTIR__Online : BOOL; FTIR_CO : REAL; FTIR_Sp : REAL; FTIR_En : BOOL; END_VAR
+FTIR_En := TRUE;
+IF FTIR__Online THEN
+  FTIR_Sp := FTIR_CO;
+END_IF;
+END_PROGRAM`)},
+		"modbus_manifest.yaml": &fstest.MapFile{Data: []byte(`sources:
+  - id: FTIR
+    host: 192.168.20.51
+    unitid: 1
+    wordorder: little
+    timeout: 3s
+    enable: FTIR_En
+tags:
+  - {name: FTIR_CO, source: FTIR, table: holding, address: 14, format: float32}
+  - {name: FTIR_Sp, source: FTIR, table: holding, address: 262, format: int32, writable: true, rewrite: 2.5s}
+`)},
+	}
+	p, err := Load(files, "")
+	if err != nil {
+		t.Fatalf("a modbus project must load with no device: %v", err)
+	}
+	drv, ok := p.Runtime.Driver.(*modbus.Driver)
+	if !ok {
+		t.Fatalf("driver = %T, want *modbus.Driver", p.Runtime.Driver)
+	}
+	// The bindings (a writable one is polled too — read-back is the source
+	// of truth) plus the synthesized companion.
+	if got := drv.InputNames(); !reflect.DeepEqual(got, []string{"FTIR_CO", "FTIR_Sp", "FTIR__Online"}) {
+		t.Fatalf("InputNames = %v", got)
+	}
+	// The writable binding plus the source's Enable command tag.
+	if got := drv.OutputNames(); !reflect.DeepEqual(got, []string{"FTIR_En", "FTIR_Sp"}) {
+		t.Fatalf("OutputNames = %v", got)
+	}
+	// tag-classes globs land: FTIR_CO polls in the slow class.
+	classes := drv.ScanClasses()
+	if !reflect.DeepEqual(classes["slow"], []string{"FTIR_CO"}) {
+		t.Fatalf("ScanClasses = %v", classes)
+	}
+	// The composed project compiles — what `nautilus check` and `build` do.
+	if _, err := runtime.New(p.Runtime); err != nil {
+		t.Fatalf("a modbus project must compile: %v", err)
+	}
+	fn := p.DriverStatus(nil)
+	if fn == nil {
+		t.Fatal("DriverStatus must report a modbus driver")
+	}
+	sts := fn()
+	if len(sts) != 1 || sts[0].Kind != "modbus" || sts[0].State != "connecting" {
+		t.Fatalf("DriverStatus = %+v", sts)
+	}
+	if len(sts[0].Devices) != 1 || sts[0].Devices[0].ID != "FTIR" || sts[0].Devices[0].Online {
+		t.Fatalf("Devices = %+v", sts[0].Devices)
+	}
+}
+
+func TestLoadModbusErrors(t *testing.T) {
+	base := `tasks:
+  - program: program.fbd
+driver:
+  type: modbus
+`
+	for _, tc := range []struct{ name, extra, manifest, want string }{
+		{"no manifest key", "", "", "driver modbus: manifest"},
+		{"missing manifest file", "  manifest: nope.yaml\n", "", "driver modbus"},
+		{"manifest typo is an error", "  manifest: m.yaml\n",
+			"sources:\n  - id: S\n    host: h\n    wordordr: little\n", "unknown key"},
+		{"unknown source", "  manifest: m.yaml\n",
+			"sources:\n  - id: S\n    host: h\ntags:\n  - {name: T, source: nope, table: holding, address: 0, format: uint16}\n",
+			"unknown source"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := fsys(base + tc.extra)
+			if tc.manifest != "" {
+				files["m.yaml"] = &fstest.MapFile{Data: []byte(tc.manifest)}
+			}
+			_, err := Load(files, "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// modbusStatus renders the driver's health categorically — states step on
+// events an operator acts on, free-runners are marked volatile.
+func TestModbusStatus(t *testing.T) {
+	up := func(id string) modbus.SourceHealth {
+		return modbus.SourceHealth{ID: id, Addr: id + ":502", State: "connected", Blocks: 2}
+	}
+	h := modbus.Health{Sources: []modbus.SourceHealth{up("A"), up("B")}, Reads: 10}
+	if s := modbusStatus(h); s.State != "connected" || s.Kind != "modbus" || len(s.Devices) != 2 {
+		t.Fatalf("all-up = %+v", s)
+	}
+
+	h.Sources[1].State = "error"
+	h.Sources[1].LastError = "dial: refused"
+	if s := modbusStatus(h); s.State != "degraded" || s.LastError == "" {
+		t.Fatalf("one-down = %+v", s)
+	}
+
+	h.Sources[0].State = "error"
+	h.Sources[0].LastError = "dial: refused"
+	if s := modbusStatus(h); s.State != "error" {
+		t.Fatalf("all-down = %+v", s)
+	}
+
+	h = modbus.Health{Sources: []modbus.SourceHealth{{ID: "A", State: "parked", Blocks: 1}}}
+	if s := modbusStatus(h); s.State != "waiting" {
+		t.Fatalf("all-parked = %+v", s)
+	}
+
+	// A refused block on an otherwise healthy source is degraded, and the
+	// per-source free-runners ride Extra under VolatileExtra.
+	h = modbus.Health{Sources: []modbus.SourceHealth{{ID: "A", State: "connected", Blocks: 2, BadBlocks: 1, RTTMs: 3.2}}}
+	s := modbusStatus(h)
+	if s.State != "degraded" {
+		t.Fatalf("bad-block = %+v", s)
+	}
+	if len(s.VolatileExtra) == 0 || s.Extra["sources"] == nil {
+		t.Fatalf("per-source rows must ride Extra with VolatileExtra, got %+v", s)
+	}
+
+	// Queued writes surface as a gauge only when something is queued.
+	h = modbus.Health{Sources: []modbus.SourceHealth{{ID: "A", State: "error", QueuedWrites: 3}}}
+	found := false
+	for _, m := range modbusStatus(h).Metrics {
+		if m.Label == "queued writes" && m.Value == 3 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("queued writes gauge missing")
 	}
 }

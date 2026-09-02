@@ -62,6 +62,17 @@ func runProject(fsys fs.FS, manifest, label, dir string) int {
 			return 1
 		}
 		proj.Runtime.Coordinator = el
+		// A driver whose outputs carry device-side watchdogs (the modbus
+		// Rewrite keep-alives: SC10 safety word, i550 control word) must
+		// stop asserting them the moment this replica is not the leader —
+		// two replicas must never both write a control word, and a
+		// stopped leader's silence is what trips the device's own
+		// fail-safe instead of masking the fault. The elector is the gate;
+		// the runtime already keeps a standby from scanning at all, so
+		// this only governs the driver's OWN re-assert loop.
+		if g, ok := proj.Runtime.Driver.(interface{ SetWriteGate(func() bool) }); ok {
+			g.SetWriteGate(el.IsLeader)
+		}
 	}
 	if proj.Retain != nil {
 		cm, file := proj.RetainNames()

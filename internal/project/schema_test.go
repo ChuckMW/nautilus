@@ -163,7 +163,7 @@ func TestSchemaDriverTypesAreImplemented(t *testing.T) {
 			t.Errorf("schema offers driver type %q but the loader does not recognise it", typ)
 		}
 	}
-	_, err := buildDriver(fstest.MapFS{}, DriverConfig{Type: "modbus"})
+	_, err := buildDriver(fstest.MapFS{}, DriverConfig{Type: "opcua"})
 	if err == nil || !strings.Contains(err.Error(), unknown) {
 		t.Errorf("loader accepted a driver type the schema's enum does not offer: %v", err)
 	}
@@ -247,6 +247,20 @@ func TestSchemaRequiresWhatLoaderRequires(t *testing.T) {
 		}
 		requires(t, "driver(sparkplug-host)", driverRequires(t, "sparkplug-host"), key)
 	}
+
+	// modbus needs only a manifest — like sparkplug-host, ALL of its checks
+	// are offline (modbus.New never dials), so the positive case is
+	// asserted too: a complete config builds with no device in sight.
+	modbusFS := fstest.MapFS{"modbus_manifest.yaml": &fstest.MapFile{Data: []byte(
+		"sources:\n  - id: DEV\n    host: 192.0.2.1\ntags:\n" +
+			"  - {name: T, source: DEV, table: holding, address: 0, format: uint16}\n")}}
+	if _, err := buildDriver(modbusFS, DriverConfig{Type: "modbus", Manifest: "modbus_manifest.yaml"}); err != nil {
+		t.Fatalf("a complete modbus driver must build offline: %v", err)
+	}
+	if _, err := buildDriver(modbusFS, DriverConfig{Type: "modbus"}); err == nil {
+		t.Fatal("loader accepted a modbus driver with no manifest")
+	}
+	requires(t, "driver(modbus)", driverRequires(t, "modbus"), "manifest")
 }
 
 // driverRequires reports what the schema demands of one driver type. A
