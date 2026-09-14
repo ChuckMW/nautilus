@@ -2,7 +2,7 @@
 
 Working notes for picking up development in a fresh session. See `README.md`
 for the vision/architecture and `RELEASING.md` for the release pipeline; this
-file is the practical state + next steps. Last refreshed: 2026-08-24.
+file is the practical state + next steps. Last refreshed: 2026-09-10.
 
 ## What this is
 
@@ -24,6 +24,14 @@ nautilus; copy/adapt from it.
 - **CI only runs on pushes to main and on PRs.** A long-lived branch with no
   PR gets zero CI — open the PR early. (This bit the acceptance-testing
   branch: 23 commits accumulated with a red test suite nobody saw.)
+- **State on 2026-09-10:** PRs #1–#7 are merged; `main` carries everything
+  below. Artifacts: CLI **v0.8.0**, extension **0.9.25**, HMI **0.6.0** (both
+  published 2026-09-10 from main). The Modbus work is NOT on main yet — it
+  lives on local, unpushed branches in worktrees (`modbus-cli` → `modbus`,
+  `multi-driver`, and `demo-integration` which merges both;
+  `~/Development/joyautomation/nautilus-{modbus-cli,modbus,multi,demo}`).
+  All four were merged with main on 2026-09-10 and pass the full suite;
+  they have never had CI (see the next bullet) — push and open the PR early.
 - Releases: see `RELEASING.md`. CLI ships on `v*` tags (GoReleaser);
   extension + HMI publish-on-bump from main (`publish.yml`); `version-sync`
   in CI fails any push where a registry is ahead of the repo. Extension
@@ -39,7 +47,12 @@ internal/project     manifest loader — builds exactly what `nautilus run` runs
 internal/lsp         LSP: ST diagnostics/hover/completion, manifest-aware tags,
                      ST expectation regions inside *_test.yaml
 io/, eip/            driver seam + Memory driver; EtherNet/IP (incl. logixserver)
-sparkplug/           Sparkplug B (TCK conformance test in CI)
+sparkplug/           Sparkplug B edge node (TCK edge profile in CI)
+sparkplug/host       Sparkplug B host application driver + `nautilus sparkplug
+                     import|browse|tags` codegen (TCK host profile in CI)
+modbus/              Modbus TCP driver: wire, codec, block planner, per-source polling,
+                     in-process slave, codegen for `nautilus modbus import|browse|serve|tags`
+retain/, leader/, hist/  retained state (file/ConfigMap), Lease election, historian
 server/              tag API (state/SSE/write) + branded dashboard
 cmd/nautilus         CLI: new, run, build, check, test, lsp, pull
 alarm/               ISA-18.2 alarm engine: defs/rules, state machine, journal,
@@ -58,6 +71,8 @@ website/, docs/      docs site (deploys from main); design briefs in docs/design
 - `tags.md` — tag generation, shape verification, UDTs. **Built.**
 - `sfc.md` — SFC front-end notes.
 - `alarms.md` — the alarm subsystem. **Built** (see 2026-08-22 below).
+- `sparkplug-host.md` — the host application driver. **Built** (PR #6, merged 2026-09-10).
+- `modbus.md` — the Modbus TCP driver. **Built** (PR #8); generic port of the brief the driver was written against.
 
 ## Gotchas
 
@@ -94,6 +109,15 @@ website/, docs/      docs site (deploys from main); design briefs in docs/design
 - npm trusted-publisher for the HMI verifies the workflow *filename*
   (`publish.yml`); repo variable `PUBLISH_HMI=true` arms it.
 - `GOTOOLCHAIN=local` in CI keeps the pinned Go a floor (this bit v0.4.1).
+- **`go test ./...` can hang for the full 10-minute default in
+  `sparkplug/host`** (seen once, 2026-09-10: goroutines parked in mochi-mqtt's
+  `(*Clients).Delete` lock under the parallel suite; the package passes alone
+  in ~13 s and a rerun passed). Run full suites with `-timeout 240s` so a hang
+  costs four minutes, and rerun before diagnosing.
+- **The extension's Marketplace upload in `publish.yml` can time out**
+  (`Request timeout: /_apis/gallery`, twice on 2026-09-10). It is transient:
+  `gh run rerun <id> --failed` published cleanly. The Open VSX step is skipped
+  when it fails, so both registries lag until the rerun.
 - Toolchain is standard now: `go` on PATH (1.25.x local, CI pins 1.24),
   `npm`/`node` via `~/.local/node/bin` on PATH for hmi/extension work.
 
@@ -129,40 +153,6 @@ topology mismatch → 409 "deploy that commit instead").
 `project.Sources(fsys, manifest)` composes task→source from any fs.FS —
 pointed at a snapshot it rebuilds the past exactly as boot composes the
 present. Guide: website .../guides/program-history.md.
-
-Done 2026-08-19: **Sparkplug manifest tier finished** — `store-forward:`
-joined the `sparkplug:` section (project.go + schema, the schema-sync
-test enforces the pair), client60 uses it, and the sparkplug guide was
-rewritten manifest-first (YAML leads, Go tier demoted to a "From Go"
-section — the house pattern for all guides). Content: N-13 (comms/MQTT
-episode) developed in ~/Development/joyautomation/content — angle, beat
-sketch, Tier-3 sourcing note; still gated on wk 16 shipping.
-
-Done 2026-08-22: **Sparkplug B host application driver** — the other side
-of the wire from the edge node. `sparkplug/host` (package `host`), a
-manifest-tier `io.Driver` (`driver: {type: sparkplug-host}`), never dials
-(`New` builds offline; `Start` connects — same split as `eip`, so
-`nautilus check`/`build` pass with no broker in sight). `nautilus
-sparkplug import|browse|tags` generates `sparkplug_types.st` +
-`sparkplug_manifest.yaml` + `tags/sparkplug.yaml`, live (`--broker`) or
-offline from a committed `--sites` file — byte-identical output either
-way. Quality rides on driver-synthesized `__Online`/`__LastBirthMs`/
-`__Rebirth` companions (Sparkplug keeps the last value through a death;
-"reads fault until first birth" — guard on `__Online`). Passes the
-Sparkplug TCK **host-application** profile (81/0/3 — 81 PASS, 0 FAIL, 3
-N/A) alongside the existing edge-node profile, both gated in CI.
-`examples/sparkplug-host` (a 3-site fleet, generated via `--sites`,
-`fleet.st` rollups, `fleet_test.yaml` in virtual time) and the manifest-
-first guide (`guides/sparkplug-host.md`, linked from the edge-node guide).
-`st-struct-pins` (worktree `~/Development/joyautomation/nautilus-st`) is
-a separate branch in flight; `sparkplug-host` is now correct under BOTH
-output contracts ahead of the `demo-integration` merge — a write to an
-offline node is queued per site and delivered once on its next birth
-(unless the birth already reports that value) instead of being dropped
-and re-raised by a next scan change-push never makes, and the driver
-implements `io.BatchReader`'s `ReadInputsInto`. Driving project:
-the Pomona WRD demo at `~/Development/pomona/wrd` — a ~60-site fleet is
-the real target this driver is being built for.
 
 Done 2026-08-22: **alarms** — `alarm/` turns BOOL tags into ISA-18.2 state
 (active list, ack, shelve, journal, notifiers), wired through every tier.
@@ -226,7 +216,6 @@ per generation+filter, so the fleet shares one). Deltas are OPT-IN on the
 wire — the plain stream is byte-identical to what it always was, since the
 VS Code extension and any curl client depend on it. Guide:
 website/.../guides/streaming.md.
-Done 2026-08-24: **Per-tag quality on sparkplug-host** — `Driver.Quality()` implements `io.QualityReporter` (its seam ported from `st-struct-pins`' `io/quality.go`, byte-identical apart from the Memory-driver half that branch's differing `io.go` doesn't support here yet): NotConnected for a data binding never delivered (never birthed, or the metric a birth simply never carries), Stale for one with a value on file whose node/device is offline or gone stale, Good (omitted) once delivered and online; writable and companion tags are always Good.
 
 Done 2026-08-24 (st-struct-pins, uncommitted): **the SSE frame floor** — the
 non-tag blocks gated like tags. Measured on the WRD host, every frame
@@ -289,32 +278,66 @@ the real target this driver is being built for.
 
 Done 2026-08-24: **Per-tag quality on sparkplug-host** — `Driver.Quality()` implements `io.QualityReporter` (its seam ported from `st-struct-pins`' `io/quality.go`, byte-identical apart from the Memory-driver half that branch's differing `io.go` doesn't support here yet): NotConnected for a data binding never delivered (never birthed, or the metric a birth simply never carries), Stale for one with a value on file whose node/device is offline or gone stale, Good (omitted) once delivered and online; writable and companion tags are always Good.
 
+Done 2026-09-10: **integration debt cleared.** PR #6 (sparkplug-host)
+merged as a merge commit; HMI 0.6.0 and extension 0.9.25 published; the
+Modbus branch stack merged with main (three small conflicts — the CLI's
+`modbus` subcommand, and `driverStatusFuncs` in `internal/project/drivers.go`,
+which is the multi-driver branch's replacement for main's inline type
+switches and already covers the Sparkplug host). Docs: the four language pages
+carry VS Code screenshots (`website/src/assets/editors/`) of text-left,
+diagram-right with live values, taken against `examples/heated-tank-nogo`
+and `examples/tank-batch-sfc`. README's sparkplug-host paragraph now says
+writes to an offline site are queued, matching the driver.
+
+Done 2026-09-13: **Modbus TCP finished and up for review (PR #8).** Beyond
+the driver that was already on the branch: a foreign-implementation test —
+`modbus/testdata/sim/pymodbus_sim.py` (pymodbus 3.15, four units, every
+format in both orders, an absent range that answers exception 0x02) driven
+by `modbus/foreign_test.go` (gated on `NAUTILUS_MODBUS_SIM`, plus
+`NAUTILUS_MODBUS_SIM_SLOW` for the latency case) as the `modbus-sim` CI job;
+`scripts/modbus-sim.sh` runs the same on a laptop. It found one real driver
+gap: a request timeout re-dialed immediately with no backoff (only a failed
+dial backed off), and a connected-but-silent device's tags read Good — now
+the ladder climbs on a broken connection and resets only once a read was
+answered, and a never-delivered tag is NotConnected even while the socket is
+up. In-process slave tests cover block parking/un-parking, a wrong-unit-id
+reply, and one slow block leaving the others coherent. `docs/design/modbus.md`
+is the generic brief; the guide is `guides/modbus.md`; README gained its
+section; extension 0.9.26 ships the `modbus` schema. `multi-driver` is
+merged with `modbus` locally (`drivers.go` resolution = demo-integration's)
+and follows as PR #9. Not done: a run against real hardware (checklist
+below), and `nautilus modbus serve --from <url>` (feed the bench slave from a
+running controller's /api/state so a sim project drives the "devices").
+
 Next, in rough priority:
 
-1. **HMI Versions page** — render /api/program/history in
+1. **Land the Modbus stack** — merge PR #8, then `multi-driver` as PR #9
+   (needs a `drivers:` docs section and extension 0.9.27 for its schema
+   change), tag **v0.9.0**, rebuild the demo binary from `demo-integration`
+   (that worktree exists only for the demo build). Real-device checklist
+   when the bench devices are available: `nautilus modbus browse` each for
+   word order and addressing; run `examples/modbus` with a device map for the
+   real units; confirm exception behaviour on an unimplemented register and
+   reconnect after a cable pull; record each device's quirks in a "devices
+   we have met" table in the guide.
+2. **HMI Versions page** — render /api/program/history in
    @joyautomation/nautilus-hmi (mini-scada's Versions page is the
    reference): commit list, diffs, activate button. The demo moment for
    the content calendar ("your PLC shows its own git log").
-2. **Fleet HMI patterns** — driven by the Pomona WRD demo
+3. **Alarm engine + fleet HMI patterns** — driven by the Pomona WRD demo
    (`~/Development/pomona/wrd`): a real alarm/annunciation model over a
    sparkplug-host fleet (priorities, ack/shelve, per-site rollups), and
    the HMI components a multi-site SCADA screen actually needs beyond
-   `DriverStatusPanel`. (Alarm engine core itself is done — see above.)
-3. **Verify VS Code ladder editor webview build** (FB rung groups) and cut an extension pre-release.
-4. **Publish @joyautomation/nautilus-hmi** (alarm kit, alarms.svelte.ts rename) to npm.
-5. **Remote counter RESET coil / task scan-order guarantee / remote-program FB pin reads** — asks from a real ControlLogix transpile (see the Pomona demo's sites/aep/README.md limitations table, abstract it as "a real ControlLogix transpile").
-6. **Alarm notifiers beyond log/webhook**.
-7. **Merge PRs #6 and #7** (note: the `demo-integration` worktree ~/Development/joyautomation/nautilus-demo exists only to build the demo binary).
-8. **Native-Go function blocks** alongside ST (both lowering to the IR).
-9. **Extension stable release** — first stable-channel Marketplace release, when the Test Explorer + schema work has soaked on the pre-release channel.
+   `DriverStatusPanel`. Worth a look while there: IEC 62923's silence-with-
+   timer state and warning→alarm escalation (evaluated 2026-09-09 against
+   OpenBridge; not adopted as code, the ISA-18.2 skeleton stays).
+4. **Remote counter RESET coil / task scan-order guarantee / remote-program FB
+   pin reads** — asks from a real ControlLogix transpile (see the Pomona
+   demo's sites/aep/README.md limitations table; abstract it as "a real
+   ControlLogix transpile").
+5. **Alarm notifiers beyond log/webhook**.
+6. **Native-Go function blocks** alongside ST (both lowering to the IR).
+7. **Extension 0.10.0** — first stable-channel Marketplace release, when the
+   Test Explorer + schema work has soaked on the pre-release channel.
 
 - **VS Code extension (2026-08-22 check):** the ladder-FB webview work (ldPreview.ts, LadderView.svelte, ladder.ts) compiles, svelte-checks, vite-builds and tests green (59+84). Pre-existing, unrelated: `tools/vscode-iec/webview-ui/package.json` pins `typescript: ^7.0.2`, which svelte-check 4.7.x cannot load (needs TS ^5||^6 — `ts.sys` gone); run `npm install --no-save typescript@^5.9` to check locally, and 39 older svelte-check errors exist in App/Sfc/mimic/test files (missing @types/node, allowImportingTsExtensions, @xyflow .d.ts). Track separately.
-
-2. **Alarm engine + fleet HMI patterns** — driven by the Pomona WRD demo
-   (`~/Development/pomona/wrd`): a real alarm/annunciation model over a
-   sparkplug-host fleet (priorities, ack/shelve, per-site rollups), and
-   the HMI components a multi-site SCADA screen actually needs beyond
-   `DriverStatusPanel`.
-3. **Native-Go function blocks** alongside ST (both lowering to the IR).
-4. **Extension 0.10.0** — first stable-channel Marketplace release, when the
-   Test Explorer + schema work has soaked on the pre-release channel.
