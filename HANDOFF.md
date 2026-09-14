@@ -2,7 +2,7 @@
 
 Working notes for picking up development in a fresh session. See `README.md`
 for the vision/architecture and `RELEASING.md` for the release pipeline; this
-file is the practical state + next steps. Last refreshed: 2026-09-10.
+file is the practical state + next steps. Last refreshed: 2026-09-13.
 
 ## What this is
 
@@ -25,13 +25,10 @@ nautilus; copy/adapt from it.
   PR gets zero CI — open the PR early. (This bit the acceptance-testing
   branch: 23 commits accumulated with a red test suite nobody saw.)
 - **State on 2026-09-10:** PRs #1–#7 are merged; `main` carries everything
-  below. Artifacts: CLI **v0.8.0**, extension **0.9.25**, HMI **0.6.0** (both
-  published 2026-09-10 from main). The Modbus work is NOT on main yet — it
-  lives on local, unpushed branches in worktrees (`modbus-cli` → `modbus`,
-  `multi-driver`, and `demo-integration` which merges both;
-  `~/Development/joyautomation/nautilus-{modbus-cli,modbus,multi,demo}`).
-  All four were merged with main on 2026-09-10 and pass the full suite;
-  they have never had CI (see the next bullet) — push and open the PR early.
+  below. Artifacts: CLI **v0.9.1**, extension **0.9.27**, HMI **0.6.0**. The
+  Modbus stack (PRs #8 and #9) is on main as of 2026-09-13; the
+  `demo-integration` worktree (`~/Development/joyautomation/nautilus-demo`)
+  is the only branch still off main, and only for the demo build.
 - Releases: see `RELEASING.md`. CLI ships on `v*` tags (GoReleaser);
   extension + HMI publish-on-bump from main (`publish.yml`); `version-sync`
   in CI fails any push where a registry is ahead of the repo. Extension
@@ -303,23 +300,24 @@ answered, and a never-delivered tag is NotConnected even while the socket is
 up. In-process slave tests cover block parking/un-parking, a wrong-unit-id
 reply, and one slow block leaving the others coherent. `docs/design/modbus.md`
 is the generic brief; the guide is `guides/modbus.md`; README gained its
-section; extension 0.9.26 ships the `modbus` schema. `multi-driver` is
-merged with `modbus` locally (`drivers.go` resolution = demo-integration's)
-and follows as PR #9. Not done: a run against real hardware (checklist
+section; extension 0.9.26 ships the `modbus` schema. `multi-driver`
+followed as PR #9 (merged the same day): `drivers:` on one scan via
+`io.Multi`, documented in the Modbus guide and README, extension 0.9.27.
+Released as **v0.9.0** (Modbus, tagged one commit early) and **v0.9.1**
+(drivers:); CLI v0.8.0 → v0.9.1 is the jump that adds `nautilus modbus`. Not done: a run against real hardware (checklist
 below), and `nautilus modbus serve --from <url>` (feed the bench slave from a
 running controller's /api/state so a sim project drives the "devices").
 
 Next, in rough priority:
 
-1. **Land the Modbus stack** — merge PR #8, then `multi-driver` as PR #9
-   (needs a `drivers:` docs section and extension 0.9.27 for its schema
-   change), tag **v0.9.0**, rebuild the demo binary from `demo-integration`
-   (that worktree exists only for the demo build). Real-device checklist
-   when the bench devices are available: `nautilus modbus browse` each for
-   word order and addressing; run `examples/modbus` with a device map for the
-   real units; confirm exception behaviour on an unimplemented register and
-   reconnect after a cable pull; record each device's quirks in a "devices
-   we have met" table in the guide.
+1. **Modbus real-device run** — when the bench devices are available:
+   `nautilus modbus browse` each for word order and addressing; run
+   `examples/modbus` with a device map for the real units; confirm exception
+   behaviour on an unimplemented register and reconnect after a cable pull;
+   record each device's quirks in a "devices we have met" table in the guide.
+   Also still open: `nautilus modbus serve --from <url>` (feed the bench
+   slave from a running controller's /api/state), and rebuilding the demo
+   binary from `demo-integration` (that worktree exists only for that).
 2. **HMI Versions page** — render /api/program/history in
    @joyautomation/nautilus-hmi (mini-scada's Versions page is the
    reference): commit list, diffs, activate button. The demo moment for
