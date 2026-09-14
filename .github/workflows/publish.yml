@@ -93,8 +93,12 @@ jobs:
         run: |
           if [ -z "$VSCE_PAT" ]; then echo "VSCE_PAT not set — skipping Marketplace publish"; exit 0; fi
           npx --yes @vscode/vsce publish ${{ steps.v.outputs.pre }} -p "$VSCE_PAT"
+      # Runs even when the Marketplace step failed: its gallery API times out
+      # for stretches (three runs in a row on 2026-09-13), and Open VSX should
+      # not lag behind because of it. The job still fails, so a rerun retries
+      # the Marketplace; the Open VSX step is idempotent and skips itself.
       - name: Publish to Open VSX
-        if: steps.v.outputs.publish == 'true'
+        if: steps.v.outputs.publish == 'true' && !cancelled()
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
