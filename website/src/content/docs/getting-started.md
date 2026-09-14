@@ -58,7 +58,7 @@ The one binary is the whole toolchain: `nautilus new` (scaffold a
 project), `run`, `test`, `check` (the CI gate: compiles every program and
 cross-checks it against the manifest), `build`, `pull` (bring a controller's
 running program back into the repo), `lsp` (the language server the VS Code
-extension uses), and the `eip`, `sparkplug`, and `historian` tools.
+extension uses), and the `eip`, `modbus`, `sparkplug`, and `historian` tools.
 
 ## 2. Scaffold a project
 

@@ -50,6 +50,8 @@ io/, eip/            driver seam + Memory driver; EtherNet/IP (incl. logixserver
 sparkplug/           Sparkplug B edge node (TCK edge profile in CI)
 sparkplug/host       Sparkplug B host application driver + `nautilus sparkplug
                      import|browse|tags` codegen (TCK host profile in CI)
+modbus/              Modbus TCP driver: wire, codec, block planner, per-source polling,
+                     in-process slave, codegen for `nautilus modbus import|browse|serve|tags`
 retain/, leader/, hist/  retained state (file/ConfigMap), Lease election, historian
 server/              tag API (state/SSE/write) + branded dashboard
 cmd/nautilus         CLI: new, run, build, check, test, lsp, pull
@@ -70,6 +72,7 @@ website/, docs/      docs site (deploys from main); design briefs in docs/design
 - `sfc.md` — SFC front-end notes.
 - `alarms.md` — the alarm subsystem. **Built** (see 2026-08-22 below).
 - `sparkplug-host.md` — the host application driver. **Built** (PR #6, merged 2026-09-10).
+- `modbus.md` — the Modbus TCP driver. **Built** (PR #8); generic port of the brief the driver was written against.
 
 ## Gotchas
 
@@ -286,11 +289,37 @@ diagram-right with live values, taken against `examples/heated-tank-nogo`
 and `examples/tank-batch-sfc`. README's sparkplug-host paragraph now says
 writes to an offline site are queued, matching the driver.
 
+Done 2026-09-13: **Modbus TCP finished and up for review (PR #8).** Beyond
+the driver that was already on the branch: a foreign-implementation test —
+`modbus/testdata/sim/pymodbus_sim.py` (pymodbus 3.15, four units, every
+format in both orders, an absent range that answers exception 0x02) driven
+by `modbus/foreign_test.go` (gated on `NAUTILUS_MODBUS_SIM`, plus
+`NAUTILUS_MODBUS_SIM_SLOW` for the latency case) as the `modbus-sim` CI job;
+`scripts/modbus-sim.sh` runs the same on a laptop. It found one real driver
+gap: a request timeout re-dialed immediately with no backoff (only a failed
+dial backed off), and a connected-but-silent device's tags read Good — now
+the ladder climbs on a broken connection and resets only once a read was
+answered, and a never-delivered tag is NotConnected even while the socket is
+up. In-process slave tests cover block parking/un-parking, a wrong-unit-id
+reply, and one slow block leaving the others coherent. `docs/design/modbus.md`
+is the generic brief; the guide is `guides/modbus.md`; README gained its
+section; extension 0.9.26 ships the `modbus` schema. `multi-driver` is
+merged with `modbus` locally (`drivers.go` resolution = demo-integration's)
+and follows as PR #9. Not done: a run against real hardware (checklist
+below), and `nautilus modbus serve --from <url>` (feed the bench slave from a
+running controller's /api/state so a sim project drives the "devices").
+
 Next, in rough priority:
 
-1. **Land the Modbus stack** — push `modbus` and `multi-driver`, open PRs so
-   CI finally runs on them, merge, then rebuild the demo binary from
-   `demo-integration` (that worktree exists only for the demo build).
+1. **Land the Modbus stack** — merge PR #8, then `multi-driver` as PR #9
+   (needs a `drivers:` docs section and extension 0.9.27 for its schema
+   change), tag **v0.9.0**, rebuild the demo binary from `demo-integration`
+   (that worktree exists only for the demo build). Real-device checklist
+   when the bench devices are available: `nautilus modbus browse` each for
+   word order and addressing; run `examples/modbus` with a device map for the
+   real units; confirm exception behaviour on an unimplemented register and
+   reconnect after a cable pull; record each device's quirks in a "devices
+   we have met" table in the guide.
 2. **HMI Versions page** — render /api/program/history in
    @joyautomation/nautilus-hmi (mini-scada's Versions page is the
    reference): commit list, diffs, activate button. The demo moment for
