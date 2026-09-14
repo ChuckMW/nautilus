@@ -2,9 +2,9 @@ package main
 
 // `nautilus modbus` is the commissioning side of the Modbus TCP driver:
 // import (a committed device map → modbus_manifest.yaml + tags/modbus.yaml,
-// offline), browse (read a live register range raw + decoded — the poke
-// tentacle never had), serve (stand in for a train of devices from the
-// manifest alone), and tags (re-derive the tag file, no map needed).
+// offline), browse (read a live register range raw + decoded), serve (stand
+// in for a skid of devices from the manifest alone), and tags (re-derive the
+// tag file, no map needed).
 //
 // It mirrors `nautilus eip import|browse|tags` deliberately: one importer
 // per protocol, one shape to learn. The structural difference is that the
@@ -82,8 +82,6 @@ Serve flags:
   --values     JSON file of {tag: value} seeding the registers through the
                manifest's bindings (encoded with each source's word order)
   --ramp       Drift the numeric input tags slowly, for a live-looking bench
-  TODO --from <url>: feed values from a running nautilus /api/state so a sim
-  project drives the "devices" — not implemented in this wave.
 `
 
 func runModbus(args []string) int {

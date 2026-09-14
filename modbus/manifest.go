@@ -50,7 +50,7 @@ type Source struct {
 	UnitID uint8
 	// WordOrder is the register order of multi-register values: "big"
 	// (default) or "little" — tentacle's reverseWords. Per source because
-	// the same hardware has shipped both ways (Anybus, tentacle-survey §4).
+	// the same hardware has shipped both ways (Anybus; brief §9 risk 2).
 	WordOrder string
 	// ByteOrder is the byte order within each register: "big" (default) or
 	// "little" — tentacle's reverseBits.

@@ -297,7 +297,7 @@ func nodeDetail(n sphost.NodeStatus) string {
 // source, driver-wide traffic counters as Volatile metrics, and the
 // per-source free-runners (RTT, retries, exceptions) in Extra["sources"]
 // named by VolatileExtra — hostStatus's lesson applied from day one, so a
-// train of fifteen sources never puts this block on every frame. Everything
+// skid of fifteen sources never puts this block on every frame. Everything
 // that is NOT volatile steps on an event an operator acts on: a source
 // dropping, parking, a block going Bad, a command queueing for a dark
 // device.

@@ -1,9 +1,9 @@
 // Package modbus is the Modbus TCP field driver core for nautilus. It talks
-// to every polled device on a Stax xbox (FTIR, FID, SCR, ADAM modules, Anybus
-// gateways fronting Omron loops, i550 VFDs, Banner SC10s, and the AL1352
-// IO-Link masters' DO words) through the io.Driver seam, replacing tentacle's
-// one-request-per-variable client with validated manifests and coalesced
-// block reads.
+// to the polled devices on a typical skid (gas analysers, ADAM I/O modules,
+// Anybus gateways fronting several controllers on one socket, VFDs, safety
+// controllers, IO-Link masters' DO words) through the io.Driver seam, with
+// validated manifests and coalesced block reads instead of one request per
+// variable.
 //
 // This file is the wire layer: MBAP framing and the client side of function
 // codes 1, 2, 3, 4, 5, 6, 15 and 16 over an abstract conn seam, so everything

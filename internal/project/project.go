@@ -876,7 +876,7 @@ func buildDriver(fsys fs.FS, d DriverConfig) (nio.Driver, error) {
 		}
 		return sphost.New(hm, cfg, opts...)
 	case "modbus":
-		// Modbus TCP: every polled field device on a train's xbox (brief
+		// Modbus TCP: every polled field device on a skid or site (brief
 		// docs/design/modbus.md). modbus.New NEVER dials — it validates the
 		// manifest and computes the block-read plan offline, so `nautilus
 		// check` and `build` pass with no device in sight, the same split

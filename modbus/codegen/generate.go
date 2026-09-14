@@ -21,7 +21,7 @@ import (
 type Options struct {
 	// Instance restricts the output to one instance id ("" = all) — the
 	// brief's `--instance`, for a map that describes a whole plant when
-	// one box only polls its own train.
+	// one controller only polls its own skid.
 	Instance string
 	// Writable marks matching tags writable in ADDITION to the map's own
 	// writable: rows — the `--writable` escape hatch.

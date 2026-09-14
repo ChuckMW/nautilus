@@ -1,7 +1,8 @@
 // plan.go turns tag bindings into the block-read plan: which requests
-// actually hit each device. tentacle issued one Modbus request per variable
-// per interval (~60 req/s across a train); coalescing bindings into block
-// reads per (source, table, scan class) turns an FTIR's 16 requests into one.
+// actually hit each device. A naive client issues one Modbus request per
+// variable per interval (tens of requests a second across a skid); coalescing
+// bindings into block reads per (source, table, scan class) turns a 16-channel
+// analyser's 16 requests into one.
 // Pure functions over the manifest — New validates and plans offline, so
 // `nautilus check` and `build` pass with no device in sight, and
 // `nautilus modbus import --plan` prints Plan.String for the commissioning
