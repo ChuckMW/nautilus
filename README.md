@@ -71,7 +71,7 @@ This gives you the whole toolchain in one binary: `nautilus new` (scaffold a
 project), `run`, `test`, `check` (the CI gate: compiles every program and
 cross-checks it against the manifest), `build`, `pull` (bring a controller's
 running program back into the repo), `lsp` (the language server the VS Code
-extension uses), and the `eip`, `sparkplug`, and `historian` tools.
+extension uses), and the `eip`, `modbus`, `sparkplug`, and `historian` tools.
 
 **2. Scaffold a project**
 
@@ -262,6 +262,40 @@ the live controller at startup so type drift fails loudly, and writes
 changed outputs back on change — the runtime behaves like a PLC peer on the
 network. Pure Go, no cgo; tested against an in-repo ControlLogix emulator
 (`eip/logixserver`).
+
+### Talking to Modbus TCP devices
+
+Field devices that aren't a Logix PLC — PID loops behind a gateway, VFDs,
+analysers, power meters — come from a committed **device map**: register
+maps off the datasheet once per device *type*, hosts and unit-ids once per
+*instance*.
+
+```sh
+nautilus modbus import --map devices.yaml --plan
+```
+
+That writes `modbus_manifest.yaml` and `tags/modbus.yaml` — both generated,
+never hand-edited, byte-identical on re-run — and `--plan` prints the
+block-read plan: a four-channel analyser's floats coalesce into one FC3
+request instead of four. In a manifest project the driver is configuration:
+
+```yaml
+driver:
+  type: modbus
+  manifest: modbus_manifest.yaml   # from `nautilus modbus import`
+  scan-rate: 1s
+  scan-classes: { fast: 500ms, slow: 2.5s }
+tag-files: [tags/modbus.yaml]
+```
+
+Addresses are 0-based PDU addresses (40001 is holding 0); word and byte
+order are per source, because the same hardware ships both ways. A Modbus
+exception marks just that block bad and keeps polling; a transport failure
+reconnects with backoff while values hold and `<source>__Online` goes false.
+`nautilus modbus serve` stands in for the whole plant on one listener, so
+the bench needs no hardware. `examples/modbus` is a complete plant, and the
+[Modbus TCP guide](https://nautilus.joyautomation.com/guides/modbus/) covers
+the rest.
 
 ### Online edits — change logic while it runs
 
@@ -693,6 +727,13 @@ pre-release channel, the HMI kit on npm. What ships today:
   template upload, `nautilus eip import` codegen (ST TYPE block + Go tag
   manifest), write-on-change outputs, and a Logix controller emulator
   (`eip/logixserver`) for hermetic integration tests
+- ✅ `modbus` — Modbus TCP driver: block-read planner (one request per device
+  instead of one per variable), per-source word/byte order, scan classes,
+  per-tag quality that tells a refused register (exception → that block bad,
+  siblings good) from a dead link (reconnect backoff, values hold),
+  keep-alive `rewrite:` outputs, `nautilus modbus import|browse|serve|tags`
+  codegen and commissioning tools, and an in-process slave plus a pymodbus
+  foreign-stack run in CI
 - ✅ `server` — tag API: JSON snapshot, SSE stream, tag writes (HMI + editor),
   a gated program API for online edits (`GET/PUT /api/program`, rollback),
   and (`server.hmi`) serving a built HMI at "/" with SPA fallback, so the

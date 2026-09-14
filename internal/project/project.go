@@ -26,6 +26,7 @@ import (
 	"github.com/joyautomation/nautilus/internal/stproject"
 	nio "github.com/joyautomation/nautilus/io"
 	"github.com/joyautomation/nautilus/lang/st"
+	"github.com/joyautomation/nautilus/modbus"
 	"github.com/joyautomation/nautilus/runtime"
 	"github.com/joyautomation/nautilus/server"
 	"github.com/joyautomation/nautilus/sparkplug"
@@ -203,12 +204,16 @@ type MetaConfig struct {
 // DriverConfig selects and configures the field driver. "memory" (the
 // default) is the loopback used for bring-up; "eip" polls an
 // Allen-Bradley Logix controller; "sparkplug-host" consumes a Sparkplug B
-// group as a host application. Custom buses are the Go tier.
+// group as a host application; "modbus" polls a set of Modbus TCP sources.
+// Custom buses are the Go tier.
 //
 // One flat struct serves every driver type, so `manifest` is shared: for
 // eip it is the imported Logix tag manifest, for sparkplug-host the
-// imported Sparkplug manifest. buildDriver validates per type, so a key
-// belonging to another driver is inert rather than an error.
+// imported Sparkplug manifest, for modbus the imported modbus manifest.
+// modbus deliberately adds NO keys of its own — it reuses manifest,
+// scan-rate, scan-classes and tag-classes wholesale. buildDriver validates
+// per type, so a key belonging to another driver is inert rather than an
+// error.
 type DriverConfig struct {
 	Type string `yaml:"type"`
 	// Name tells drivers in a drivers: list apart — in status rows, error
@@ -216,10 +221,10 @@ type DriverConfig struct {
 	// "eip-2" when a type repeats. Inert on a lone driver: section.
 	Name string `yaml:"name"`
 
-	// eip
+	// eip (manifest/scan-rate/scan-classes/tag-classes shared with modbus)
 	Host        string              `yaml:"host"`
 	Slot        int                 `yaml:"slot"`
-	Manifest    string              `yaml:"manifest"` // YAML eip.Manifest / host.Manifest file
+	Manifest    string              `yaml:"manifest"` // YAML eip / host / modbus manifest file
 	ScanRate    Duration            `yaml:"scan-rate"`
 	ScanClasses map[string]Duration `yaml:"scan-classes"`
 	TagClasses  map[string][]string `yaml:"tag-classes"`
@@ -963,7 +968,38 @@ func buildDriver(fsys fs.FS, d DriverConfig) (nio.Driver, error) {
 			opts = append(opts, sphost.WithDiscovery(d.OnUnknown))
 		}
 		return sphost.New(hm, cfg, opts...)
+	case "modbus":
+		// Modbus TCP: every polled field device on a skid or site (brief
+		// docs/design/modbus.md). modbus.New NEVER dials — it validates the
+		// manifest and computes the block-read plan offline, so `nautilus
+		// check` and `build` pass with no device in sight, the same split
+		// eip and sparkplug-host make. The config keys are eip's, reused
+		// wholesale: manifest, scan-rate, scan-classes, tag-classes.
+		if d.Manifest == "" {
+			return nil, fmt.Errorf("driver modbus: manifest (the imported modbus_manifest.yaml) is required")
+		}
+		raw, err := fs.ReadFile(fsys, path.Clean(d.Manifest))
+		if err != nil {
+			return nil, fmt.Errorf("driver modbus: %w", err)
+		}
+		// ParseManifest decodes with KnownFields semantics, so a typo is an
+		// error rather than a silently dropped binding.
+		mm, err := modbus.ParseManifest(raw)
+		if err != nil {
+			return nil, fmt.Errorf("driver modbus: %s: %w", d.Manifest, err)
+		}
+		opts := []modbus.Option{modbus.WithLogger(slog.Default().With("driver", "modbus"))}
+		if d.ScanRate != 0 {
+			opts = append(opts, modbus.WithScanRate(time.Duration(d.ScanRate)))
+		}
+		for name, rate := range d.ScanClasses {
+			opts = append(opts, modbus.WithScanClass(name, time.Duration(rate)))
+		}
+		for class, patterns := range d.TagClasses {
+			opts = append(opts, modbus.WithTagClass(class, patterns...))
+		}
+		return modbus.New(mm, opts...)
 	default:
-		return nil, fmt.Errorf("driver type %q: manifest projects support memory, eip and sparkplug-host — custom buses are the Go tier (io.Driver)", d.Type)
+		return nil, fmt.Errorf("driver type %q: manifest projects support memory, eip, sparkplug-host and modbus — custom buses are the Go tier (io.Driver)", d.Type)
 	}
 }

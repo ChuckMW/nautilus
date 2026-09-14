@@ -98,3 +98,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: goreleaser/goreleaser-action@v6
         with: {version: '~> v2', args: check}
+  modbus-sim:
+    name: Modbus TCP — foreign stack (pymodbus)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.24'}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      # The driver's only other peer is its own slave; pymodbus is the foreign
+      # implementation (someone else's encoder, datastore and exception
+      # handling). Pinned exactly: the 3.x datastore API moved twice (3.7
+      # ModbusSlaveContext → 3.11 ModbusDeviceContext → 3.15 SimDevice) and
+      # the script targets the last one. Bump with modbus/testdata/sim.
+      - run: pip install 'pymodbus==3.15.0'
+      # Two sims from one script: the seeded map on 5020, and the same map
+      # answering every request 1s late on 5021 for the timeout case. Wait
+      # for each one's "listening on" line rather than sleeping.
+      - name: Start simulators
+        run: |
+          python modbus/testdata/sim/pymodbus_sim.py --port 5020 > sim.log 2>&1 &
+          python modbus/testdata/sim/pymodbus_sim.py --port 5021 --latency-ms 1000 > sim-slow.log 2>&1 &
+          for i in $(seq 1 50); do
+            grep -q 'listening on' sim.log && grep -q 'listening on' sim-slow.log && break
+            sleep 0.2
+          done
+          grep -q 'listening on' sim.log && grep -q 'listening on' sim-slow.log \
+            || { echo '::error::simulator did not start'; cat sim.log sim-slow.log; exit 1; }
+      # Decode of every seeded format in all four word/byte layouts, write
+      # round trip per function code, exception 0x02 → one Bad block, and the
+      # latency-above-timeout path. Skipped without the env vars.
+      - name: Foreign-stack tests
+        run: |
+          NAUTILUS_MODBUS_SIM=127.0.0.1:5020 NAUTILUS_MODBUS_SIM_SLOW=127.0.0.1:5021 \
+            go test ./modbus/ -run TestForeign -v -timeout 120s

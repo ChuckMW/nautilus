@@ -7,6 +7,7 @@ import (
 
 	"github.com/joyautomation/nautilus/eip"
 	nio "github.com/joyautomation/nautilus/io"
+	"github.com/joyautomation/nautilus/modbus"
 	"github.com/joyautomation/nautilus/server"
 	"github.com/joyautomation/nautilus/sparkplug"
 	sphost "github.com/joyautomation/nautilus/sparkplug/host"
@@ -43,6 +44,8 @@ func driverStatusFuncs(d nio.Driver) []func() server.DriverStatus {
 		return []func() server.DriverStatus{func() server.DriverStatus { return eipStatus(drv.Health()) }}
 	case *sphost.Driver:
 		return []func() server.DriverStatus{func() server.DriverStatus { return hostStatus(drv.Status()) }}
+	case *modbus.Driver:
+		return []func() server.DriverStatus{func() server.DriverStatus { return modbusStatus(drv.Health()) }}
 	case *nio.Multi:
 		var out []func() server.DriverStatus
 		for _, c := range drv.Children() {
@@ -303,6 +306,147 @@ func nodeDetail(n sphost.NodeStatus) string {
 	default:
 		return fmt.Sprintf("%d tags", n.Metrics)
 	}
+}
+
+// modbusStatus adapts the Modbus driver's health: one DriverDevice row per
+// source, driver-wide traffic counters as Volatile metrics, and the
+// per-source free-runners (RTT, retries, exceptions) in Extra["sources"]
+// named by VolatileExtra — hostStatus's lesson applied from day one, so a
+// skid of fifteen sources never puts this block on every frame. Everything
+// that is NOT volatile steps on an event an operator acts on: a source
+// dropping, parking, a block going Bad, a command queueing for a dark
+// device.
+func modbusStatus(h modbus.Health) server.DriverStatus {
+	s := server.DriverStatus{
+		Kind: "modbus",
+		Name: "modbus",
+	}
+	connected, parked, down, blocks, badBlocks, queued := 0, 0, 0, 0, 0, 0
+	var lastErr string
+	for _, src := range h.Sources {
+		blocks += src.Blocks
+		badBlocks += src.BadBlocks
+		queued += src.QueuedWrites
+		switch src.State {
+		case "connected":
+			connected++
+		case "parked":
+			parked++
+		default: // connecting | error
+			down++
+		}
+		if src.LastError != "" {
+			lastErr = src.ID + ": " + src.LastError
+		}
+		if src.SinceMs > s.SinceMs {
+			s.SinceMs = src.SinceMs
+		}
+	}
+	total := len(h.Sources)
+	s.Detail = fmt.Sprintf("%d %s · %d %s", total, plural(total, "source"), blocks, plural(blocks, "block"))
+	s.LastError = lastErr
+
+	// connected → degraded (a source dark, or a block refused) → error
+	// (nothing answers) → connecting/waiting. Parked sources are deliberate
+	// and count against nothing.
+	switch {
+	case down == 0 && badBlocks > 0:
+		s.State = "degraded"
+		s.Message = fmt.Sprintf("%d %s refused (exception) — check the register map", badBlocks, plural(badBlocks, "block"))
+	case down == 0 && connected > 0:
+		s.State = "connected"
+		s.Message = fmt.Sprintf("Polling %d %s", connected, plural(connected, "source"))
+	case down == 0 && parked > 0:
+		s.State = "waiting"
+		s.Message = "All sources parked (enable tags false)"
+	case connected > 0:
+		s.State = "degraded"
+		s.Message = fmt.Sprintf("%d of %d sources down", down, total)
+	case lastErr != "":
+		s.State = "error"
+		s.Message = "Connect failed — retrying"
+	default:
+		s.State = "connecting"
+		s.Message = fmt.Sprintf("Connecting to %d %s", total, plural(total, "source"))
+	}
+
+	s.Metrics = []server.DriverMetric{
+		{Label: "sources", Value: float64(total), Text: fmt.Sprintf("%d / %d", connected, total)},
+		{Label: "blocks", Value: float64(blocks)},
+		{Label: "reads", Value: float64(h.Reads), Volatile: true},
+		{Label: "writes", Value: float64(h.Writes), Volatile: true},
+		{Label: "errors", Value: float64(h.Errors), Volatile: true},
+	}
+	if queued > 0 {
+		// Commands waiting for a dark source — a gauge that clears itself
+		// the moment the source reconnects and they go out.
+		s.Metrics = append(s.Metrics, server.DriverMetric{Label: "queued writes", Value: float64(queued)})
+	}
+
+	rows := make([]modbusSourceRow, 0, total)
+	for _, src := range h.Sources {
+		s.Devices = append(s.Devices, server.DriverDevice{
+			ID:     src.ID,
+			Online: src.State == "connected",
+			Detail: modbusSourceDetail(src),
+		})
+		rows = append(rows, modbusSourceRow{
+			ID: src.ID, Addr: src.Addr, State: src.State, SinceMs: src.SinceMs,
+			Blocks: src.Blocks, BadBlocks: src.BadBlocks, QueuedWrites: src.QueuedWrites,
+			RTTMs: src.RTTMs, Retries: src.Retries, Exceptions: src.Exceptions,
+		})
+	}
+	s.Extra = map[string]any{"sources": rows}
+	// The per-source free-runners: RTT moves with every read, retries and
+	// exceptions with every failure burst. They ride whenever the block is
+	// sent but never push it onto a delta stream by themselves.
+	s.VolatileExtra = []string{"sources.rttMs", "sources.retries", "sources.exceptions"}
+	return s
+}
+
+// modbusSourceRow is one source in Extra["sources"] — the structured twin of
+// the flattened Devices list. Lower-camel JSON names, like every other field
+// this API puts on the wire.
+type modbusSourceRow struct {
+	ID           string  `json:"id"`
+	Addr         string  `json:"addr"`
+	State        string  `json:"state"`
+	SinceMs      int64   `json:"sinceMs,omitempty"`
+	Blocks       int     `json:"blocks"`
+	BadBlocks    int     `json:"badBlocks,omitempty"`
+	QueuedWrites int     `json:"queuedWrites,omitempty"`
+	RTTMs        float64 `json:"rttMs,omitempty"`
+	Retries      uint64  `json:"retries,omitempty"`
+	Exceptions   uint64  `json:"exceptions,omitempty"`
+}
+
+// modbusSourceDetail is one source's row text. Categorical on purpose — no
+// ages, nothing that re-renders on its own (see hostStatus's block comment).
+func modbusSourceDetail(src modbus.SourceHealth) string {
+	switch src.State {
+	case "connected":
+		if src.BadBlocks > 0 {
+			return fmt.Sprintf("%d %s · %d refused", src.Blocks, plural(src.Blocks, "block"), src.BadBlocks)
+		}
+		if src.QueuedWrites > 0 {
+			return fmt.Sprintf("%d %s · %d queued", src.Blocks, plural(src.Blocks, "block"), src.QueuedWrites)
+		}
+		return fmt.Sprintf("%d %s", src.Blocks, plural(src.Blocks, "block"))
+	case "parked":
+		return "parked"
+	case "error":
+		return "error — retrying"
+	default:
+		return "connecting"
+	}
+}
+
+// plural appends an s for n ≠ 1 — status text reads as a sentence.
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
 }
 
 func sparkplugStatus(st sparkplug.Status) server.DriverStatus {
