@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/joyautomation/nautilus/eip"
+	nio "github.com/joyautomation/nautilus/io"
 	"github.com/joyautomation/nautilus/modbus"
 	"github.com/joyautomation/nautilus/server"
 	"github.com/joyautomation/nautilus/sparkplug"
@@ -17,28 +18,42 @@ import (
 // server.Options.Drivers so /api/drivers and the stream frame carry it, with
 // the server package staying free of any driver dependency.
 func (p *Project) DriverStatus(node *sparkplug.Node) func() []server.DriverStatus {
-	eipDrv, hasEIP := p.Runtime.Driver.(*eip.Driver)
-	hostDrv, hasHost := p.Runtime.Driver.(*sphost.Driver)
-	modbusDrv, hasModbus := p.Runtime.Driver.(*modbus.Driver)
-	if !hasEIP && !hasHost && !hasModbus && node == nil {
+	rows := driverStatusFuncs(p.Runtime.Driver)
+	if len(rows) == 0 && node == nil {
 		return nil
 	}
 	return func() []server.DriverStatus {
 		var out []server.DriverStatus
-		if hasEIP {
-			out = append(out, eipStatus(eipDrv.Health()))
-		}
-		if hasHost {
-			out = append(out, hostStatus(hostDrv.Status()))
-		}
-		if hasModbus {
-			out = append(out, modbusStatus(modbusDrv.Health()))
+		for _, row := range rows {
+			out = append(out, row())
 		}
 		if node != nil {
 			out = append(out, sparkplugStatus(node.Status()))
 		}
 		return out
 	}
+}
+
+// driverStatusFuncs maps a driver onto the per-kind adapters below — one
+// row per driver, so a multi-driver set flattens to one row per CHILD and
+// /api/drivers (already a list) needs no new shape. The memory loopback
+// reports nothing, exactly as before.
+func driverStatusFuncs(d nio.Driver) []func() server.DriverStatus {
+	switch drv := d.(type) {
+	case *eip.Driver:
+		return []func() server.DriverStatus{func() server.DriverStatus { return eipStatus(drv.Health()) }}
+	case *sphost.Driver:
+		return []func() server.DriverStatus{func() server.DriverStatus { return hostStatus(drv.Status()) }}
+	case *modbus.Driver:
+		return []func() server.DriverStatus{func() server.DriverStatus { return modbusStatus(drv.Health()) }}
+	case *nio.Multi:
+		var out []func() server.DriverStatus
+		for _, c := range drv.Children() {
+			out = append(out, driverStatusFuncs(c.Driver)...)
+		}
+		return out
+	}
+	return nil
 }
 
 func eipStatus(h eip.Health) server.DriverStatus {

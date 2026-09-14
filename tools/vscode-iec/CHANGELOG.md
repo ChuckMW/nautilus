@@ -3,6 +3,15 @@
 All notable changes to the **nautilus IEC 61131-3** extension are documented
 here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.27] - 2026-09-13
+
+### Added
+
+- **Manifest schema** learns `drivers:` — a list of field drivers on one
+  scan, each entry the same shape as `driver:` plus an optional `name`
+  (default: the type, deduped as `eip-2`). `driver:` stays for the single
+  case; setting both is an error the loader reports.
+
 ## [0.9.26] - 2026-09-13
 
 ### Added

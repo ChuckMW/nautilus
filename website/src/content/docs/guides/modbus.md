@@ -298,6 +298,40 @@ Without `--format` it prints every format side by side, which is how you
 find a device's real word order in one shot. Other flags: `--table`
 (holding | input | coil | discrete), `--timeout`.
 
+## Modbus alongside another bus: `drivers:`
+
+A skid is rarely the whole plant. When the same controller also consumes a
+Sparkplug fleet, or polls a Logix PLC over EtherNet/IP, list the drivers
+instead of picking one — `drivers:` is the plural of `driver:`, each entry
+the same shape:
+
+```yaml
+drivers:
+  - type: modbus
+    manifest: modbus_manifest.yaml
+    scan-classes: { fast: 500ms }
+  - type: sparkplug-host
+    name: fleet                      # optional; default is the type, deduped as "eip-2"
+    broker: "tcp://mqtt.plant:1883"
+    group-id: Plant
+    host-id: plant-scada
+    manifest: sparkplug_manifest.yaml
+tag-files: [tags/modbus.yaml, tags/sparkplug.yaml]
+```
+
+Reads fan out to every driver and merge; a write goes to the one driver
+whose bindings claim the tag. Ownership is disjoint by construction: a tag
+delivered by two drivers, or writable through two, is a **load error naming
+both** — `nautilus check` reports it offline, the same no-last-wins rule
+tag files keep. Setting `driver:` and `drivers:` together is an error too;
+move the single driver into the list. On `/api/drivers` each driver keeps
+its own row (the Modbus one still has a device row per source), quality
+merges per tag, and a Sparkplug `device:` on the same controller is healthy
+only when every child bus is — an operator reading the device online should
+be able to trust all of its tags, not the subset whose bus is up. The
+`memory` loopback cannot join a list: it owns whatever is written to it,
+which is exactly what makes it unroutable next to another driver.
+
 ## Redundancy
 
 With a `redundancy:` section, the driver's write gate is wired to leadership

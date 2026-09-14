@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -54,9 +55,14 @@ type Manifest struct {
 	// TagMeta layers HMI documentation onto tags declared elsewhere — keyed
 	// by tag name, or by a dotted path (`P101.Speed`) for one field of a
 	// UDT tag. Documentation only; it cannot change a tag's role or seed.
-	TagMeta   map[string]MetaConfig `yaml:"tag-meta"`
-	Driver    DriverConfig          `yaml:"driver"`
-	Sparkplug *SparkplugConfig      `yaml:"sparkplug"`
+	TagMeta map[string]MetaConfig `yaml:"tag-meta"`
+	Driver  DriverConfig          `yaml:"driver"`
+	// Drivers configures SEVERAL field drivers on one scan — a Modbus bus
+	// plus an MQTT feed on the same controller. Each entry is the same
+	// shape as driver:, plus an optional name; setting both driver: and
+	// drivers: is an error. One entry behaves exactly like driver:.
+	Drivers   []DriverConfig   `yaml:"drivers"`
+	Sparkplug *SparkplugConfig `yaml:"sparkplug"`
 	// Retain persists operator state (setpoints, online edits) across
 	// restarts; Redundancy elects one scanning leader among replicas.
 	// Both are wired by `nautilus run` — check/build/LSP only validate.
@@ -210,6 +216,10 @@ type MetaConfig struct {
 // error.
 type DriverConfig struct {
 	Type string `yaml:"type"`
+	// Name tells drivers in a drivers: list apart — in status rows, error
+	// messages, and logs. Defaults to the driver's type, deduped as
+	// "eip-2" when a type repeats. Inert on a lone driver: section.
+	Name string `yaml:"name"`
 
 	// eip (manifest/scan-rate/scan-classes/tag-classes shared with modbus)
 	Host        string              `yaml:"host"`
@@ -361,14 +371,10 @@ func (p *Project) Sparkplug(rt *runtime.Runtime) (*sparkplug.Node, error) {
 		if n, ok := p.Runtime.Driver.(interface{ InputNames() []string }); ok {
 			tags = n.InputNames()
 		}
-		var health func() bool
-		if h, ok := p.Runtime.Driver.(interface{ Health() eip.Health }); ok {
-			health = func() bool { return h.Health().Connected }
-		}
 		opts = append(opts, sparkplug.WithDevice(sparkplug.Device{
 			ID:     c.Device,
 			Tags:   tags,
-			Health: health,
+			Health: driverHealth(p.Runtime.Driver),
 		}))
 	}
 	return sparkplug.New(rt, cfg, opts...)
@@ -557,7 +563,7 @@ func Load(fsys fs.FS, name string) (*Project, error) {
 		return nil, err
 	}
 	opts.Meta = applyTagMeta(opts.Tags, m.TagMeta)
-	if opts.Driver, err = buildDriver(fsys, m.Driver); err != nil {
+	if opts.Driver, err = buildDrivers(fsys, m); err != nil {
 		return nil, err
 	}
 
@@ -781,6 +787,93 @@ func normalize(v any) any {
 		return float64(x)
 	}
 	return v
+}
+
+// driverHealth adapts a field driver's connection state onto the bool the
+// Sparkplug device: wiring gates DBIRTH/DDEATH with. nil means the driver
+// has no notion of a connection (memory) and the device is always healthy —
+// the behaviour that existed before health reporting did. A multi-driver
+// set is healthy only when EVERY child that has an opinion is: an operator
+// reading the device online should be able to trust all of its tags, not
+// the lucky subset whose bus is up.
+func driverHealth(d nio.Driver) func() bool {
+	switch drv := d.(type) {
+	case *eip.Driver:
+		return func() bool { return drv.Health().Connected }
+	case *sphost.Driver:
+		return func() bool { return drv.Status().Connected }
+	case *nio.Multi:
+		var checks []func() bool
+		for _, c := range drv.Children() {
+			if h := driverHealth(c.Driver); h != nil {
+				checks = append(checks, h)
+			}
+		}
+		if len(checks) == 0 {
+			return nil
+		}
+		return func() bool {
+			for _, h := range checks {
+				if !h() {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return nil
+}
+
+// buildDrivers resolves the manifest's driver:/drivers: pair into one
+// nio.Driver. The singular form is sugar for a one-element list, so one
+// construction path serves both; two or more wrap in nio.Multi, which is
+// where duplicate tag ownership across drivers is refused (a load-time
+// error naming both drivers — the same no-last-wins rule tag files keep).
+func buildDrivers(fsys fs.FS, m Manifest) (nio.Driver, error) {
+	configs := m.Drivers
+	if !reflect.DeepEqual(m.Driver, DriverConfig{}) {
+		if len(configs) > 0 {
+			return nil, fmt.Errorf("%s: driver: and drivers: are both set — drivers: is the plural of the same section, so move the single driver into the list", ManifestName)
+		}
+		configs = []DriverConfig{m.Driver}
+	}
+	switch len(configs) {
+	case 0:
+		// No driver section at all: the memory loopback, as ever.
+		return buildDriver(fsys, DriverConfig{})
+	case 1:
+		return buildDriver(fsys, configs[0])
+	}
+	// Names default to the type, deduped "eip-2" — stable, predictable, and
+	// only needed once two drivers share a manifest. An explicit name that
+	// collides is caught by NewMulti, which checks the final set.
+	counts := map[string]int{}
+	named := make([]nio.NamedDriver, 0, len(configs))
+	for i, c := range configs {
+		name := c.Name
+		if name == "" {
+			base := strings.ToLower(c.Type)
+			if base == "" {
+				base = "memory"
+			}
+			counts[base]++
+			if n := counts[base]; n > 1 {
+				name = fmt.Sprintf("%s-%d", base, n)
+			} else {
+				name = base
+			}
+		}
+		d, err := buildDriver(fsys, c)
+		if err != nil {
+			return nil, fmt.Errorf("drivers[%d] (%s): %w", i, name, err)
+		}
+		named = append(named, nio.NamedDriver{Name: name, Driver: d})
+	}
+	multi, err := nio.NewMulti(named...)
+	if err != nil {
+		return nil, fmt.Errorf("drivers: %w", err)
+	}
+	return multi, nil
 }
 
 func buildDriver(fsys fs.FS, d DriverConfig) (nio.Driver, error) {

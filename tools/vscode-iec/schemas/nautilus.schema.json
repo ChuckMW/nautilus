@@ -49,7 +49,15 @@
     },
     "driver": {
       "$ref": "#/definitions/driver",
-      "description": "The field driver. Defaults to \"memory\", the loopback used for bring-up."
+      "description": "The field driver. Defaults to \"memory\", the loopback used for bring-up. For more than one bus on the same scan, use drivers: instead \u2014 setting both is an error."
+    },
+    "drivers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/driver"
+      },
+      "minItems": 1,
+      "description": "Several field drivers on one scan \u2014 e.g. an EtherNet/IP poll plus a Sparkplug feed. Each entry is the same shape as driver:, plus an optional name to tell status rows apart. A tag may be owned by exactly one driver; a duplicate is a load-time error naming both. One entry behaves exactly like driver:. Do not set driver: as well."
     },
     "sparkplug": {
       "$ref": "#/definitions/sparkplug",
@@ -259,6 +267,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Names this driver in status rows and error messages when several share a drivers: list (default: its type, deduped \"eip-2\"). Inert on a lone driver: section."
+        },
         "type": {
           "enum": [
             "memory",

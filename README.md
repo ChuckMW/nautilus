@@ -345,6 +345,33 @@ the bench needs no hardware. `examples/modbus` is a complete plant, and the
 [Modbus TCP guide](https://nautilus.joyautomation.com/guides/modbus/) covers
 the rest.
 
+#### More than one bus: `drivers:`
+
+A controller that polls a Modbus skid *and* consumes a Sparkplug fleet on
+the same scan lists both. `drivers:` is the plural of `driver:` — each entry
+is the same shape, with an optional `name` that status rows and error
+messages use (default: the type, deduped as `eip-2` when a type repeats):
+
+```yaml
+drivers:
+  - type: modbus
+    manifest: modbus_manifest.yaml
+  - type: sparkplug-host
+    name: fleet
+    broker: "tcp://mqtt.plant:1883"
+    group-id: Plant
+    host-id: plant-scada
+    manifest: sparkplug_manifest.yaml
+```
+
+Reads fan out and merge, writes route to the driver whose bindings claim the
+tag, and ownership is disjoint by construction: a tag delivered by two
+drivers is a load error naming both, the same no-last-wins rule tag files
+keep. `/api/drivers` shows one row per driver, and a Sparkplug `device:`
+counts as healthy only when every child bus is. The `memory` loopback cannot
+join a list — it owns whatever is written to it, which is exactly what makes
+it unroutable next to another driver.
+
 ### Online edits — change logic while it runs
 
 nautilus has two planes. The **cold plane** — connections, the tag manifest,
