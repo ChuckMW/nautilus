@@ -11,6 +11,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -556,5 +557,169 @@ func TestEnableTagParksSource(t *testing.T) {
 		h := d.Health().Sources[0]
 		v, _ := d.ReadInputs()
 		return h.State == "connected" && v["DEV__Online"] == true && len(d.Quality()) == 0
+	})
+}
+
+// Three consecutive exceptions PARK the block: no request for that block
+// leaves the driver for RetryMin while the source's other blocks keep
+// polling; after RetryMin one probe goes out, and once the fault clears the
+// block recovers on the next probe.
+func TestBlockParksAfterConsecutiveExceptionsAndUnparks(t *testing.T) {
+	srv := newSlave(t)
+	u := srv.Unit(1)
+	u.SetHolding(0, 5)
+	u.SetInput(0, 6)
+	u.InjectException(FCReadInputRegisters, 0x02)
+	rec := &recorder{}
+
+	src := fastSource("DEV", srv.Addr())
+	src.RetryMin, src.RetryMax = 300*time.Millisecond, 600*time.Millisecond
+	m := Manifest{
+		Sources: []Source{src},
+		Tags: []TagBinding{
+			{Name: "OK", Source: "DEV", Table: TableHolding, Address: 0, Format: "uint16"},
+			{Name: "BAD", Source: "DEV", Table: TableInput, Address: 0, Format: "uint16"},
+		},
+	}
+	d, err := New(m, WithScanRate(10*time.Millisecond), WithDialer(recordingDialer(rec)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	startDriver(t, d)
+
+	waitFor(t, "three exceptions", func() bool {
+		return d.Health().Sources[0].Exceptions >= exceptionsToPark
+	})
+	// Parked: the exception count and the FC4 frame count freeze together,
+	// while FC3 (the healthy block) keeps going.
+	badFrames := len(rec.writes(FCReadInputRegisters, -1))
+	okFrames := len(rec.writes(FCReadHoldingRegisters, -1))
+	time.Sleep(100 * time.Millisecond)
+	if n := len(rec.writes(FCReadInputRegisters, -1)); n != badFrames {
+		t.Fatalf("parked block must send nothing during RetryMin: %d → %d FC4 frames", badFrames, n)
+	}
+	if n := len(rec.writes(FCReadHoldingRegisters, -1)); n <= okFrames {
+		t.Fatalf("sibling block must keep polling while one is parked: %d → %d FC3 frames", okFrames, n)
+	}
+	if d.Quality()["BAD"] != nio.Bad || d.Quality()["OK"] != nio.Good {
+		t.Fatalf("quality while parked = %v", d.Quality())
+	}
+
+	// After RetryMin exactly one probe goes out, meets the fault again, and
+	// the block re-parks for another RetryMin.
+	waitFor(t, "un-park probe", func() bool {
+		return len(rec.writes(FCReadInputRegisters, -1)) > badFrames
+	})
+	probed := len(rec.writes(FCReadInputRegisters, -1))
+	time.Sleep(100 * time.Millisecond)
+	if n := len(rec.writes(FCReadInputRegisters, -1)); n != probed {
+		t.Fatalf("re-park after the probe: %d → %d FC4 frames", probed, n)
+	}
+
+	u.InjectException(FCReadInputRegisters, 0)
+	waitFor(t, "recovery on the next probe", func() bool {
+		v, _ := d.ReadInputs()
+		return v["BAD"] == int64(6) && len(d.Quality()) == 0 && d.Health().Sources[0].BadBlocks == 0
+	})
+}
+
+// stallConn is a net.Conn wrapper that delays the response to the next
+// request of one function code past the driver's timeout — latency on ONE
+// block of a multi-block cycle, which a slave-wide SetLatency cannot do.
+type stallConn struct {
+	net.Conn
+	fc      byte
+	stall   time.Duration
+	arm     *atomic.Int32 // requests left to stall
+	pending atomic.Bool
+}
+
+func (c *stallConn) Write(b []byte) (int, error) {
+	if len(b) >= 8 && b[7] == c.fc && c.arm.Load() > 0 {
+		c.arm.Add(-1)
+		c.pending.Store(true)
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *stallConn) Read(b []byte) (int, error) {
+	if c.pending.CompareAndSwap(true, false) {
+		time.Sleep(c.stall) // past the deadline: the underlying Read then times out
+	}
+	return c.Conn.Read(b)
+}
+
+// A timeout on one block mid-cycle is a transport error — the connection is
+// dropped and re-dialed — and through it the other blocks' values hold
+// coherently (a pair read in one request stays a pair, nothing reads zero)
+// and the stalled block's own last value holds; after the reconnect every
+// block delivers again.
+func TestTimeoutOnOneBlockLeavesOthersCoherent(t *testing.T) {
+	srv := newSlave(t)
+	u := srv.Unit(1)
+	u.SetHolding(0, 7)
+	u.SetHolding(1, 7)
+	u.SetInput(0, 100)
+	var arm atomic.Int32
+	dial := func(ctx context.Context, addr string) (net.Conn, error) {
+		var nd net.Dialer
+		nc, err := nd.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		return &stallConn{Conn: nc, fc: FCReadInputRegisters, stall: 300 * time.Millisecond, arm: &arm}, nil
+	}
+
+	src := fastSource("DEV", srv.Addr())
+	src.Timeout = 100 * time.Millisecond
+	m := Manifest{
+		Sources: []Source{src},
+		Tags: []TagBinding{
+			{Name: "H1", Source: "DEV", Table: TableHolding, Address: 0, Format: "uint16"},
+			{Name: "H2", Source: "DEV", Table: TableHolding, Address: 1, Format: "uint16"},
+			{Name: "I1", Source: "DEV", Table: TableInput, Address: 0, Format: "uint16"},
+		},
+	}
+	d, err := New(m, WithScanRate(15*time.Millisecond), WithDialer(dial))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(d.Plan().Blocks); n != 2 {
+		t.Fatalf("want 2 blocks (holding pair, input), got %d", n)
+	}
+	startDriver(t, d)
+	waitFor(t, "first full cycle", func() bool {
+		v, _ := d.ReadInputs()
+		return v["H1"] == int64(7) && v["H2"] == int64(7) && v["I1"] == int64(100)
+	})
+
+	// Stall the next FC4 response past Timeout, then watch every scan
+	// until the driver has accounted the transport error.
+	arm.Store(1)
+	coherent := func() {
+		t.Helper()
+		v, err := d.ReadInputs()
+		if err != nil {
+			t.Fatalf("ReadInputs must stay scan-safe: %v", err)
+		}
+		if v["H1"] != int64(7) || v["H2"] != int64(7) || v["I1"] != int64(100) {
+			t.Fatalf("values must hold through a mid-cycle timeout: %v", v)
+		}
+	}
+	waitFor(t, "transport error accounted", func() bool {
+		coherent()
+		return d.Health().Sources[0].Retries >= 1
+	})
+	coherent()
+	if h := d.Health().Sources[0]; h.Exceptions != 0 {
+		t.Fatalf("a timeout is a transport error, not an exception: %+v", h)
+	}
+
+	// Reconnected: the stalled block delivers again, with a fresh value.
+	u.SetInput(0, 101)
+	waitFor(t, "recovery", func() bool {
+		v, _ := d.ReadInputs()
+		return v["I1"] == int64(101) && v["H1"] == int64(7) && v["H2"] == int64(7) &&
+			v["DEV__Online"] == true && len(d.Quality()) == 0
 	})
 }

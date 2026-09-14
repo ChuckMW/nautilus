@@ -255,3 +255,26 @@ func TestPackUnpackBitsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// A response carrying a different unit id than the request is NOT the
+// device's answer to our question — a gateway that routed the wrong drop,
+// or a desynced stream. It is rejected as a TRANSPORT error (reconnect),
+// never mistaken for an exception (per-block failure) or for data.
+func TestRequestWrongUnitIDIsTransportError(t *testing.T) {
+	// FC3 to unit 1; the frame that comes back says unit 2.
+	c := newTCPConn(newScript(wire(t, "00 01 00 00 00 07 02 03 04 00 0A 01 02")), 0)
+	data, err := c.Request(context.Background(), 1, FCReadHoldingRegisters, wire(t, "00 00 00 02"))
+	if err == nil {
+		t.Fatalf("want error, got data % X", data)
+	}
+	if data != nil {
+		t.Errorf("no data may be returned with the error, got % X", data)
+	}
+	var exc ExceptionError
+	if errors.As(err, &exc) {
+		t.Errorf("wrong unit id must not be an ExceptionError, got %v", err)
+	}
+	if want := "response unit id 2 (want 1)"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the unit mismatch %q", err, want)
+	}
+}
