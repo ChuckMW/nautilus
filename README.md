@@ -58,16 +58,58 @@ examples/    heated-tank-nogo (manifest project, four tasks, three languages), h
 
 ## Getting started
 
-**Prerequisites:** Go 1.24+ with `$(go env GOPATH)/bin` on your `PATH`, and
-VS Code for the editor experience.
+**Platforms:** nautilus is one static binary with no runtime dependencies.
+Every release ships builds for **macOS** (Apple Silicon and Intel),
+**Linux** (x86-64 and arm64), and **Windows** (x86-64 and arm64); the
+controller it builds runs anywhere the same binary does, from a laptop to a
+Raspberry Pi to a Kubernetes pod. VS Code is the editor experience on all
+three. The
+[release page](https://github.com/joyautomation/nautilus/releases/latest)
+has the archives and a `checksums.txt`.
 
 **1. Install the CLI**
+
+*macOS* — pick `arm64` for Apple Silicon, `amd64` for Intel:
+
+```sh
+v=$(curl -fsSL https://api.github.com/repos/joyautomation/nautilus/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/joyautomation/nautilus/releases/download/$v/nautilus_${v#v}_darwin_arm64.tar.gz" | tar xz nautilus
+sudo mv nautilus /usr/local/bin/
+```
+
+Downloading with `curl` skips Gatekeeper's quarantine. If you fetched the
+archive in a browser instead and macOS refuses to open the binary, clear the
+flag once: `xattr -d com.apple.quarantine /usr/local/bin/nautilus`.
+
+*Linux* — `amd64` or `arm64`:
+
+```sh
+v=$(curl -fsSL https://api.github.com/repos/joyautomation/nautilus/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/joyautomation/nautilus/releases/download/$v/nautilus_${v#v}_linux_amd64.tar.gz" | tar xz nautilus
+sudo install nautilus /usr/local/bin/
+```
+
+*Windows* — PowerShell, `amd64` or `arm64`:
+
+```powershell
+$v = (Invoke-RestMethod https://api.github.com/repos/joyautomation/nautilus/releases/latest).tag_name
+Invoke-WebRequest "https://github.com/joyautomation/nautilus/releases/download/$v/nautilus_$($v.TrimStart('v'))_windows_amd64.zip" -OutFile nautilus.zip
+Expand-Archive nautilus.zip -DestinationPath "$env:LOCALAPPDATA\nautilus" -Force
+[Environment]::SetEnvironmentVariable("Path", "$env:LOCALAPPDATA\nautilus;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")
+```
+
+Open a new terminal afterwards so the `Path` change is picked up.
+
+*Any OS, with Go 1.24+ installed:*
 
 ```sh
 go install github.com/joyautomation/nautilus/cmd/nautilus@latest
 ```
 
-This gives you the whole toolchain in one binary: `nautilus new` (scaffold a
+This puts the binary in `$(go env GOPATH)/bin`, which needs to be on your
+`PATH`. Whichever route you took, `nautilus version` should now answer.
+
+The one binary is the whole toolchain: `nautilus new` (scaffold a
 project), `run`, `test`, `check` (the CI gate: compiles every program and
 cross-checks it against the manifest), `build`, `pull` (bring a controller's
 running program back into the repo), `lsp` (the language server the VS Code
@@ -159,6 +201,12 @@ Open your project folder — it recommends the extension — and with `go run .`
 running you get compile diagnostics as you type, go-to-definition / hover /
 completion, and **live tag values as pills** next to identifiers in
 `program.st`.
+
+On macOS, VS Code launched from the Dock or Spotlight gets the login `PATH`,
+not your shell's, so it may not find `nautilus` even though your terminal
+does. If the extension reports it could not start the language server, set
+`nautilus.cliPath` to the full path (`which nautilus`), or launch VS Code
+from a terminal with `code .`.
 
 **5. Make it yours**
 
@@ -408,8 +456,9 @@ tag-files: [tags/sparkplug.yaml]
 `--sites sites.yaml` (offline, no broker — CI-buildable) generates the
 manifest, tag file, and Template types. Reads fault until a site's first
 birth, so guard logic on the driver-synthesized `<site>__Online`
-companion; writes leave as NCMD/DCMD, dropped and counted for an offline
-site rather than queued. A UDT is never written as a whole — bind its
+companion; writes leave as NCMD/DCMD, and a write to a site that is
+offline is queued per node and delivered on its next birth, unless the
+birth already reports that value. A UDT is never written as a whole — bind its
 controls per member (`member: Speed`, or `--writable 'Motor1.START,*.HSP'`)
 and each write goes out as a partial template the edge merges, leaving the
 members the site is driving untouched. Both the edge-node and host-application **TCK
