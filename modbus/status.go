@@ -102,7 +102,14 @@ func (d *Driver) Quality() map[string]nio.Quality {
 				case s.online && br.bad:
 					mark(t.Name, nio.Bad)
 				case s.online:
-					// Good — omitted, per the non-Good-only contract.
+					// Good — omitted, per the non-Good-only contract — once
+					// the block has been delivered on some connection. A tag
+					// the device has never answered for is NotConnected even
+					// while the socket is up: connected is not the same as
+					// heard from (a gateway that accepts TCP and never replies).
+					if _, delivered := s.snapshot[t.Name]; !delivered {
+						mark(t.Name, nio.NotConnected)
+					}
 				default:
 					if _, delivered := s.snapshot[t.Name]; delivered {
 						mark(t.Name, nio.Stale)

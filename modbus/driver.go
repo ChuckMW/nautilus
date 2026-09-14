@@ -172,6 +172,7 @@ type source struct {
 	mu       sync.Mutex
 	snapshot nio.Values // decoded values, held across disconnects
 	online   bool
+	answered bool   // a read succeeded on the current connection (resets backoff)
 	state    string // parked | connecting | connected | error
 	sinceMs  int64
 	lastErr  error
@@ -383,7 +384,7 @@ func (d *Driver) buildSources() error {
 // goes quiet trips its own fail-safe — which is exactly what must happen
 // when this replica is not the leader or its logic is faulted, instead of a
 // hung controller masking the fault by refreshing a stale command
-// (brief §4b, §9 risk 3). Reads are unaffected: quality and __Online keep
+// (brief §9 risks 1 and 3). Reads are unaffected: quality and __Online keep
 // reporting.
 func (d *Driver) SetWriteGate(gate func() bool) {
 	d.gateMu.Lock()
@@ -644,7 +645,8 @@ func sameScalar(a, b any) bool {
 // ── connection / poll loop ───────────────────────────────────────────────
 
 // run is one source's life: parked ⇄ connecting ⇄ connected with 1s→60s
-// backoff on dial/IO errors (brief §2).
+// backoff on dial/IO errors (brief §2). The backoff ladder resets only once
+// the device has answered a read on a connection, not on a successful dial.
 func (d *Driver) run(ctx context.Context, s *source) {
 	backoff := s.cfg.RetryMin
 	for ctx.Err() == nil {
@@ -680,17 +682,40 @@ func (d *Driver) run(ctx context.Context, s *source) {
 			}
 			continue
 		}
-		backoff = s.cfg.RetryMin
+		s.mu.Lock()
+		s.online, s.answered = true, false
+		s.mu.Unlock()
 		s.setState("connected", nil)
-		s.setOnline(true)
 		d.log.Info("modbus: connected", "source", s.cfg.ID, "addr", s.cfg.Addr(), "blocks", len(s.blocks))
 
 		d.serve(ctx, s, c)
 
 		_ = c.Close()
-		s.setOnline(false)
-		if ctx.Err() == nil && s.isEnabled() {
-			s.setState("error", nil) // lastErr already set by whatever broke it
+		s.mu.Lock()
+		s.online = false
+		answered := s.answered
+		s.mu.Unlock()
+		if ctx.Err() != nil || !s.isEnabled() {
+			continue // shutting down, or parking: no wait, no escalation
+		}
+		s.setState("error", nil) // lastErr already set by whatever broke it
+		// A connection that broke is a failure like a dial that failed, and
+		// waits the same way — otherwise a device that accepts TCP and never
+		// answers (a hung gateway, the wrong port) is re-dialed every Timeout
+		// forever with no backoff at all. A link that did answer starts the
+		// ladder over; one that never did keeps climbing it.
+		if answered {
+			backoff = s.cfg.RetryMin
+		}
+		d.log.Warn("modbus: connection lost", "source", s.cfg.ID, "addr", s.cfg.Addr(), "retryIn", backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		case <-s.kick:
+		}
+		if backoff *= 2; backoff > s.cfg.RetryMax {
+			backoff = s.cfg.RetryMax
 		}
 	}
 }
@@ -857,6 +882,7 @@ func (d *Driver) pollBlock(ctx context.Context, s *source, c conn, br *blockRun)
 	}
 	br.excCount = 0
 	br.bad = false
+	s.answered = true
 	for _, t := range br.Bindings {
 		off := int(t.Address) - int(br.Start)
 		if regs != nil {
