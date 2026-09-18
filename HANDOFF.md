@@ -337,5 +337,16 @@ Next, in rough priority:
 6. **Native-Go function blocks** alongside ST (both lowering to the IR).
 7. **Extension 0.10.0** — first stable-channel Marketplace release, when the
    Test Explorer + schema work has soaked on the pre-release channel.
+8. **Amber badge → lightbulb** (content review, 2026-09-18). The "no tag on
+   the controller" diagnostic is honest but leaves the person to do two
+   things by hand: a write to create the tag now (`nautilus: Set Live
+   Value…` already does it) and a manifest line to keep it (typed by hand
+   in wk04 beat 3). Offer both as code actions on the diagnostic: "Set a
+   live value…" and "Add `<name>` to nautilus.yaml as a setpoint" (role,
+   init, unit prompted; inserted next to the tag it belongs with). The
+   durable path should be the easy one. Related caution to keep in the
+   guide: any API write creates a tag, so a typo'd name from an HMI makes
+   a new tag instead of failing — the driver allowlist and the write token
+   are the only guards today.
 
 - **VS Code extension (2026-08-22 check):** the ladder-FB webview work (ldPreview.ts, LadderView.svelte, ladder.ts) compiles, svelte-checks, vite-builds and tests green (59+84). Pre-existing, unrelated: `tools/vscode-iec/webview-ui/package.json` pins `typescript: ^7.0.2`, which svelte-check 4.7.x cannot load (needs TS ^5||^6 — `ts.sys` gone); run `npm install --no-save typescript@^5.9` to check locally, and 39 older svelte-check errors exist in App/Sfc/mimic/test files (missing @types/node, allowImportingTsExtensions, @xyflow .d.ts). Track separately.
