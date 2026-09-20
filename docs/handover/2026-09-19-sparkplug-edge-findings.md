@@ -223,13 +223,14 @@ You don't need the Ignition stack to fix or verify item 1. The repro script and 
 
 ### Left open
 
-- **Store-and-forward does not buffer across a broker outage, only across a primary-host outage.** Not
-  caused by this change, but found while making the decision above: `scanAndPublish` returns before the
-  publish pass whenever `born` is false, and the connection-lost handler clears `born`, so nothing is
-  buffered from the moment paho notices the loss until the rebirth. The guide (`guides/sparkplug.md`,
-  "buffers … while the broker is unreachable") promises otherwise. The fix is to run the pass in
-  buffer-only mode while unborn-with-store-forward (skip the rebirth check and device events, enqueue what
-  RBE passes). Left out of item 1 as a separate behaviour change.
+- ~~**Store-and-forward does not buffer across a broker outage, only across a primary-host outage.**~~
+  Found while making the decision above: `scanAndPublish` returned before the publish pass whenever
+  `born` was false, and the connection-lost handler clears `born`, so nothing was buffered from the moment
+  paho noticed the loss until the rebirth — whatever the guide promised. **Fixed the same day as a
+  follow-up commit on this branch:** unborn with store-and-forward on (and a birth behind it), the tick
+  samples in buffer-only mode — no rebirth scheduling, no device events — and the reconnect's birth is
+  followed by the replay. Tests: `TestStoreForwardBuffersAcrossABrokerOutage`,
+  `TestUnbornNodeWithoutStoreForwardStaysQuiet`.
 - The connection-lost handler and `onConnect` are both paho goroutines; paho spawns the reconnect and the
   lost handler back to back, so on a very fast reconnect the handler *could* run after the new session's
   birth and clear `born`. The new `IsConnectionOpen` gate does not cover that ordering. Not observed; noted.

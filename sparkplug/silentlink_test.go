@@ -286,3 +286,63 @@ func TestBirthWhosePublishNeverCompletesIsNotBorn(t *testing.T) {
 		t.Fatal("node reports born after its NBIRTH never went out")
 	}
 }
+
+// With store-and-forward on, a broker outage — paho has reported the loss,
+// born is false — does not stop sampling: every change buffers and replays
+// as historical, in order, after the reconnect's birth. Before this the tick
+// returned at !born and an outage was a hole in the historian, whatever the
+// guide promised.
+func TestStoreForwardBuffersAcrossABrokerOutage(t *testing.T) {
+	n, fc, rt := newSilentLinkNode(t, WithStoreForward(10))
+
+	n.connectionLost(fc, errors.New("EOF"))
+	fc.set(false, false)
+	for i, v := range []float64{55, 56, 57} {
+		rt.Tags().Set("LevelSP", ir.RealVal(v))
+		tickWithin(t, n, 2*time.Second)
+		if got := n.sf.len(); got != i+1 {
+			t.Fatalf("after change %d the buffer holds %d records, want %d", i+1, got, i+1)
+		}
+	}
+	if got := fc.published("NDATA"); len(got) != 0 {
+		t.Fatalf("%d NDATA handed to a client that is not connected, want 0", len(got))
+	}
+
+	// Reconnect: onConnect births (seq 0), and the next tick replays the
+	// three as historical at seq 1..3, then keeps going live.
+	fc.set(true, false)
+	if err := n.birth(); err != nil {
+		t.Fatal(err)
+	}
+	tickWithin(t, n, 2*time.Second)
+	got := fc.published("NDATA")
+	if len(got) != 3 {
+		t.Fatalf("after reconnect %d NDATA were published, want the 3 buffered", len(got))
+	}
+	for i, p := range got {
+		if seq, hist := decodeSeq(t, p); seq != uint64(i+1) || !hist {
+			t.Fatalf("replay %d: seq=%d historical=%v, want seq %d, historical", i, seq, hist, i+1)
+		}
+	}
+	rt.Tags().Set("LevelSP", ir.RealVal(58))
+	tickWithin(t, n, 2*time.Second)
+	got = fc.published("NDATA")
+	if len(got) != 4 {
+		t.Fatalf("%d NDATA after a live change, want 4", len(got))
+	}
+	if seq, hist := decodeSeq(t, got[3]); seq != 4 || hist {
+		t.Fatalf("live: seq=%d historical=%v, want seq 4, live", seq, hist)
+	}
+}
+
+// Without store-and-forward an unborn node samples nothing, as before.
+func TestUnbornNodeWithoutStoreForwardStaysQuiet(t *testing.T) {
+	n, fc, rt := newSilentLinkNode(t)
+	n.connectionLost(fc, errors.New("EOF"))
+	fc.set(false, false)
+	rt.Tags().Set("LevelSP", ir.RealVal(55))
+	tickWithin(t, n, 2*time.Second)
+	if got := fc.published("NDATA"); len(got) != 0 {
+		t.Fatalf("%d NDATA from an unborn node, want 0", len(got))
+	}
+}

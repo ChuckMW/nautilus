@@ -13,7 +13,15 @@ import (
 // when a new metric name appears (a metric must be in a birth before data).
 func (n *Node) scanAndPublish() {
 	n.mu.Lock()
-	if !n.born {
+	// Unborn — the broker is gone, or the node has not birthed yet — the
+	// tick still runs when store-and-forward is on and there has been a
+	// birth: every metric that birth introduced keeps sampling into the
+	// buffer, to replay as historical after the rebirth. That is the
+	// "buffers while the broker is unreachable" the option promises; before
+	// this the tick returned here and an outage was a hole in the historian.
+	// Before the first birth there is nothing a host could receive, so
+	// nothing to buffer.
+	if !n.born && !n.bufferingLocked() {
 		n.mu.Unlock()
 		return
 	}
@@ -22,12 +30,12 @@ func (n *Node) scanAndPublish() {
 		n.mu.Unlock()
 		return
 	}
-	// Deliverable = the primary host (if any) is online AND the transport is
-	// up right now. born alone is not enough: it is cleared by paho's
-	// connection-lost handler, which runs only once paho has noticed the
-	// loss, and a tick that lands in that window used to hand its publish
-	// to a connection about to be torn down.
-	deliverable := n.hostDeliverableLocked() && n.cli.IsConnectionOpen()
+	// Deliverable = born, the primary host (if any) online, AND the
+	// transport up right now. born alone is not enough: it is cleared by
+	// paho's connection-lost handler, which runs only once paho has noticed
+	// the loss, and a tick that lands in that window used to hand its
+	// publish to a connection about to be torn down.
+	deliverable := n.born && n.hostDeliverableLocked() && n.cli.IsConnectionOpen()
 	n.mu.Unlock()
 
 	for _, e := range deviceEvents {
@@ -89,6 +97,13 @@ func (n *Node) publishRecords(recs []sfRecord) (sent int, ok bool) {
 	return len(recs), true
 }
 
+// bufferingLocked reports whether an unborn node should still sample: it
+// has store-and-forward, and a birth has told a host which metrics exist.
+// Caller holds n.mu.
+func (n *Node) bufferingLocked() bool {
+	return n.sf != nil && len(n.known) > 0
+}
+
 // publishPassLocked is the CPU half of one publish tick: sample the tag
 // store, notice a metric that was never birthed, detect device-health
 // transitions, and run every published metric through its RBE rule. It
@@ -96,6 +111,11 @@ func (n *Node) publishRecords(recs []sfRecord) (sent int, ok bool) {
 // DBIRTH/DDEATH closures to run after the lock is released, and rebirth=true
 // when a rebirth was scheduled instead — in which case the caller publishes
 // nothing this tick. Caller holds n.mu.
+//
+// Unborn (buffering for store-and-forward), the pass only samples: a metric
+// that appeared since the last birth waits for the reconnect's birth rather
+// than scheduling a rebirth into a dead connection, and device health is
+// left alone — the next birth re-evaluates every device.
 //
 // Split out of scanAndPublish so the pass can be benchmarked without a
 // broker: everything above the MQTT seam is here.
@@ -116,19 +136,21 @@ func (n *Node) publishPassLocked(now time.Time) (msgs []sfRecord, deviceEvents [
 	// its DBIRTH covers them on the health transition — and rebirthing for
 	// them would storm empty births the whole time the device is down
 	// (e.g. every startup, while the field driver is still connecting).
-	for _, name := range n.pubNames {
-		if n.known[name] {
-			continue // already birthed — the overwhelmingly common case
+	if n.born {
+		for _, name := range n.pubNames {
+			if n.known[name] {
+				continue // already birthed — the overwhelmingly common case
+			}
+			if dev, owned := n.tagOwner[name]; owned && dev != "" && !n.devHealth[dev] {
+				continue
+			}
+			n.scheduleRebirthLocked()
+			return nil, nil, true
 		}
-		if dev, owned := n.tagOwner[name]; owned && dev != "" && !n.devHealth[dev] {
-			continue
-		}
-		n.scheduleRebirthLocked()
-		return nil, nil, true
-	}
 
-	// Device health transitions.
-	deviceEvents = n.deviceHealthLocked(snap)
+		// Device health transitions.
+		deviceEvents = n.deviceHealthLocked(snap)
+	}
 
 	// Collect changed metrics per destination.
 	nodeChanged := n.collectChanged(snap, now, "")
