@@ -239,11 +239,16 @@ type metric struct {
 	// becomes its own scalar output binding.
 	members []string
 	init    any
-	// desc is the metric's human description, from a --sites file's `desc:`.
-	// A birth cannot state one — the wire's Properties/description does not
-	// survive sparkplug.DecodePayload today — so the broker path leaves it
-	// empty rather than inventing one.
+	// desc and unit are the metric's human description and engineering
+	// unit: from a --sites file's `desc:`/`unit:`, or on the broker path
+	// from the birth's `documentation`/`engUnit` properties, which a
+	// nautilus edge states for any tag that has them. Empty when neither
+	// says — never invented.
 	desc string
+	unit string
+	// memberUnits holds a Template metric's per-member units from the
+	// birth, by dotted member path (broker path only).
+	memberUnits map[string]string
 }
 
 // buildNodes turns the harvested sites into manifest nodes, devices and
@@ -361,6 +366,7 @@ func bindings(prefix, edge, device string, mt metric, used map[string]bool,
 		Metric: mt.name,
 		Type:   mt.typ,
 		Desc:   mt.desc,
+		Unit:   mt.unit,
 	}
 	b.Writable = whole
 	if whole {
@@ -411,8 +417,10 @@ func bindings(prefix, edge, device string, mt metric, used map[string]bool,
 			Writable: true,
 			// A member tag inherits the metric's description: the source
 			// describes the METRIC, and the member path is already in the
-			// tag's own name.
+			// tag's own name. Its unit is the member's own, when the birth
+			// documented it, else the metric's.
 			Desc: mt.desc,
+			Unit: memberUnit(mt, leaf),
 		})
 	}
 	// A named member that is not a scalar leaf of the type is a typo or a
@@ -507,10 +515,54 @@ func collectMetrics(b host.Birth, tb *typeBuilder, opts Options) []metric {
 				where(b, mm.Name), mm.Datatype))
 			continue
 		}
-		out = append(out, metric{name: mm.Name, typ: typ})
+		out = append(out, metric{
+			name:        mm.Name,
+			typ:         typ,
+			desc:        mm.PropertyString(sparkplug.PropDocumentation),
+			unit:        mm.PropertyString(sparkplug.PropEngUnit),
+			memberUnits: memberUnits(mm),
+		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out
+}
+
+// memberUnits collects the engUnit property of every scalar leaf of a
+// Template instance metric, keyed by dotted member path — what a nautilus
+// edge states for a struct tag's members in its birth.
+func memberUnits(m sparkplug.Metric) map[string]string {
+	t, ok := m.Value.(*sparkplug.Template)
+	if !ok || t == nil {
+		return nil
+	}
+	out := map[string]string{}
+	var walk func(t *sparkplug.Template, prefix string)
+	walk = func(t *sparkplug.Template, prefix string) {
+		for _, mm := range t.Metrics {
+			path := prefix + mm.Name
+			if nested, ok := mm.Value.(*sparkplug.Template); ok && nested != nil {
+				walk(nested, path+host.MemberSep)
+				continue
+			}
+			if u := mm.PropertyString(sparkplug.PropEngUnit); u != "" {
+				out[path] = u
+			}
+		}
+	}
+	walk(t, "")
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// memberUnit is a member binding's unit: the member's own from the birth
+// when it stated one, else the metric's.
+func memberUnit(mt metric, leaf string) string {
+	if u, ok := mt.memberUnits[leaf]; ok {
+		return u
+	}
+	return mt.unit
 }
 
 // where renders a metric's Sparkplug address for a skip message.

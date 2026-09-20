@@ -25,6 +25,43 @@ type Metric struct {
 	IsNull       bool
 	IsHistorical bool // replayed store-and-forward data
 	Value        any  // bool | int64 | float64 | string | *Template
+	// Properties are the metric's Sparkplug properties (a PropertySet), in
+	// wire order. A birth carries the tag's documentation here under the
+	// keys hosts look for (PropEngUnit, PropDocumentation); data messages
+	// carry none.
+	Properties []Property
+}
+
+// Property is one entry of a metric's PropertySet: a key and a scalar value
+// (bool | int64 | float64 | string).
+type Property struct {
+	Key   string
+	Value any
+}
+
+// The property keys Ignition / Cirrus Link hosts map onto tag properties, and
+// the ones a nautilus birth states for a tag that has a unit or description.
+const (
+	PropEngUnit       = "engUnit"
+	PropDocumentation = "documentation"
+)
+
+// Property returns the value of the property named key, if the metric has it.
+func (m Metric) Property(key string) (any, bool) {
+	for _, p := range m.Properties {
+		if p.Key == key {
+			return p.Value, true
+		}
+	}
+	return nil, false
+}
+
+// PropertyString returns the property named key when it is a string; "" when
+// absent or of another type.
+func (m Metric) PropertyString(key string) string {
+	v, _ := m.Property(key)
+	s, _ := v.(string)
+	return s
 }
 
 // Template is a Sparkplug template value — a UDT definition (IsDefinition) or
@@ -87,6 +124,13 @@ func encodeMetric(m Metric) (*spb.Payload_Metric, error) {
 	}
 	if m.IsHistorical {
 		em.IsHistorical = proto.Bool(true)
+	}
+	if len(m.Properties) > 0 {
+		ps, err := encodeProperties(m.Properties)
+		if err != nil {
+			return nil, fmt.Errorf("metric %q: %w", m.Name, err)
+		}
+		em.Properties = ps
 	}
 	if m.IsNull {
 		em.IsNull = proto.Bool(true)
@@ -156,6 +200,71 @@ func setMetricValue(em *spb.Payload_Metric, dt spb.DataType, v any) error {
 	return nil
 }
 
+// encodeProperties writes a PropertySet. Each value's type rides in the
+// PropertyValue's own datatype field, so a host can read a property back
+// without knowing the key.
+func encodeProperties(props []Property) (*spb.Payload_PropertySet, error) {
+	ps := &spb.Payload_PropertySet{}
+	for _, p := range props {
+		pv := &spb.Payload_PropertyValue{}
+		switch v := p.Value.(type) {
+		case bool:
+			pv.Type = proto.Uint32(uint32(spb.DataType_Boolean))
+			pv.Value = &spb.Payload_PropertyValue_BooleanValue{BooleanValue: v}
+		case int64:
+			pv.Type = proto.Uint32(uint32(spb.DataType_Int64))
+			pv.Value = &spb.Payload_PropertyValue_LongValue{LongValue: uint64(v)}
+		case float64:
+			pv.Type = proto.Uint32(uint32(spb.DataType_Double))
+			pv.Value = &spb.Payload_PropertyValue_DoubleValue{DoubleValue: v}
+		case string:
+			pv.Type = proto.Uint32(uint32(spb.DataType_String))
+			pv.Value = &spb.Payload_PropertyValue_StringValue{StringValue: v}
+		default:
+			return nil, fmt.Errorf("property %q: unsupported value %T", p.Key, p.Value)
+		}
+		ps.Keys = append(ps.Keys, p.Key)
+		ps.Values = append(ps.Values, pv)
+	}
+	return ps, nil
+}
+
+// decodeProperties reads a PropertySet back into key/value pairs. Nested
+// property sets and lists have no scalar reading and are skipped; a null
+// value decodes as a key with a nil value.
+func decodeProperties(ps *spb.Payload_PropertySet) []Property {
+	if ps == nil || len(ps.GetKeys()) == 0 {
+		return nil
+	}
+	keys, vals := ps.GetKeys(), ps.GetValues()
+	out := make([]Property, 0, len(keys))
+	for i, k := range keys {
+		if i >= len(vals) {
+			break
+		}
+		pv := vals[i]
+		p := Property{Key: k}
+		switch v := pv.GetValue().(type) {
+		case *spb.Payload_PropertyValue_BooleanValue:
+			p.Value = v.BooleanValue
+		case *spb.Payload_PropertyValue_IntValue:
+			p.Value = int64(int32(v.IntValue))
+		case *spb.Payload_PropertyValue_LongValue:
+			p.Value = int64(v.LongValue)
+		case *spb.Payload_PropertyValue_FloatValue:
+			p.Value = float64(v.FloatValue)
+		case *spb.Payload_PropertyValue_DoubleValue:
+			p.Value = v.DoubleValue
+		case *spb.Payload_PropertyValue_StringValue:
+			p.Value = v.StringValue
+		case *spb.Payload_PropertyValue_PropertysetValue, *spb.Payload_PropertyValue_PropertysetsValue:
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 func encodeTemplate(t *Template) (*spb.Payload_Template, error) {
 	et := &spb.Payload_Template{IsDefinition: proto.Bool(t.IsDefinition)}
 	if t.TemplateRef != "" {
@@ -183,6 +292,7 @@ func decodeMetric(m *spb.Payload_Metric) Metric {
 		IsNull:    m.GetIsNull(),
 
 		IsHistorical: m.GetIsHistorical(),
+		Properties:   decodeProperties(m.GetProperties()),
 	}
 	switch v := m.GetValue().(type) {
 	case *spb.Payload_Metric_BooleanValue:

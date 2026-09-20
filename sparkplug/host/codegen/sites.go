@@ -40,12 +40,13 @@
 // `type:` is a Sparkplug datatype name (Boolean, Int8..UInt64, DateTime,
 // Float, Double, String, Text, UUID) or one of the `types:` entries.
 //
-// `desc:` is optional and purely descriptive: it rides through the manifest
-// into the generated tag file's `desc:`, so an alarm named "{desc} high" reads
-// "Well 6 level high" instead of "RTU9_WEL15_FIT_001 high". Member tags
-// inherit the metric's description. The BROKER path cannot supply one — a
-// metric's Properties/description does not survive payload decoding — so an
-// import from live births leaves every desc empty.
+// `desc:` and `unit:` are optional and purely descriptive: they ride through
+// the manifest into the generated tag file's `desc:`/`unit:`, so an alarm
+// named "{desc} high" reads "Well 6 level high" instead of "RTU9_WEL15_FIT_001
+// high". Member tags inherit the metric's description. The BROKER path reads
+// the same two from a birth's `documentation`/`engUnit` properties, which a
+// nautilus edge states for any tag that has them; a birth without them leaves
+// the fields empty.
 
 package codegen
 
@@ -128,6 +129,8 @@ type MetricSpec struct {
 	// Member tags inherit it. Omit it and the tag simply has no description —
 	// nothing is invented.
 	Desc string
+	// Unit is an optional engineering unit ("gpm"), for the tag file's `unit:`.
+	Unit string
 }
 
 // writableSpec normalises a MetricSpec's writable: value into "the whole
@@ -309,6 +312,7 @@ func siteMetrics(node, device string, ms []MetricSpec, opts Options) ([]metric, 
 			members:  members,
 			init:     mm.Init,
 			desc:     mm.Desc,
+			unit:     mm.Unit,
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].name < out[j].name })

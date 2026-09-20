@@ -193,6 +193,8 @@ type TagSpec struct {
 	// the binding's init when it has one, else the type zero. Nil for inputs
 	// and for struct-shaped outputs, which have no scalar literal.
 	Init any
+	// Unit is the binding's engineering unit, for the tag file's `unit:`.
+	Unit string
 	// Datatype is the Sparkplug datatype NAME the tag's value takes — the
 	// binding's own type for a scalar, the LEAF member's type for a member
 	// binding. Empty for struct-shaped tags and for the companions. The tag
@@ -231,7 +233,7 @@ func (m Manifest) TagSpecs() []TagSpec {
 		// type, not the struct's: the whole point is that the operator writes
 		// one control, so the tag an HMI binds is a BOOL or a LREAL.
 		if b.Member != "" {
-			spec := TagSpec{Name: b.Name, Role: RoleOutput, Init: b.Init, Desc: b.Desc}
+			spec := TagSpec{Name: b.Name, Role: RoleOutput, Init: b.Init, Desc: b.Desc, Unit: b.Unit}
 			if f, _, err := m.ResolveMember(b.Type, b.Member); err == nil {
 				spec.Datatype = f.Type
 				if spec.Init == nil {
@@ -241,7 +243,7 @@ func (m Manifest) TagSpecs() []TagSpec {
 			out = append(out, spec)
 			continue
 		}
-		spec := TagSpec{Name: b.Name, Role: RoleInput, Desc: b.Desc}
+		spec := TagSpec{Name: b.Name, Role: RoleInput, Desc: b.Desc, Unit: b.Unit}
 		if _, isStruct := types[b.Type]; isStruct {
 			spec.Type = b.Type
 		} else {
