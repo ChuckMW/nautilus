@@ -2,6 +2,7 @@ package sparkplug
 
 import (
 	"github.com/joyautomation/nautilus/lang/ir"
+	"github.com/joyautomation/nautilus/runtime"
 	"github.com/joyautomation/nautilus/sparkplug/spb"
 )
 
@@ -19,6 +20,8 @@ func (n *Node) birth() error {
 
 	n.mu.Lock()
 	n.seq = 0
+	n.births++
+	session := n.births
 	n.known = map[string]bool{}
 	n.rbeState = map[string]*rbeState{}
 
@@ -92,20 +95,30 @@ func (n *Node) birth() error {
 	bd := n.bdSeq // captured under the lock — Stop() may mutate n.bdSeq concurrently once unlocked
 	n.mu.Unlock()
 
-	// Publish outside the lock (paho tokens).
-	if tok := n.cli.Publish(n.topic("NBIRTH"), 0, false, nbirthPayload); tok.Wait() && tok.Error() != nil {
-		return tok.Error()
+	// Publish outside the lock (paho tokens). An NBIRTH that did not go out
+	// leaves the node unborn: data before a birth is a protocol error, and
+	// the reconnect that follows a dead link births again from onConnect.
+	// (Unless a later birth already owns n.born — hence the births check.)
+	if err := n.publish(n.topic("NBIRTH"), 0, false, nbirthPayload); err != nil {
+		n.mu.Lock()
+		if n.births == session {
+			n.born = false
+		}
+		n.mu.Unlock()
+		return err
 	}
 	for _, b := range births {
-		n.cli.Publish(n.deviceTopic("DBIRTH", b.device), 0, false, dbirthPayloads[b.device]).Wait()
+		if err := n.publish(n.deviceTopic("DBIRTH", b.device), 0, false, dbirthPayloads[b.device]); err != nil {
+			n.log.Warn("sparkplug: DBIRTH not sent", "device", b.device, "error", err)
+		}
 	}
 	n.log.Info("sparkplug: born", "group", n.cfg.GroupID, "node", n.cfg.EdgeNode,
 		"bdSeq", bd, "nodeMetrics", len(nodeTags), "devices", len(births))
 	return nil
 }
 
-// birthMetric builds a birth metric (name + datatype + value) and seeds its
-// RBE baseline + known table. Caller holds n.mu.
+// birthMetric builds a birth metric (name + datatype + value + properties)
+// and seeds its RBE baseline + known table. Caller holds n.mu.
 func (n *Node) birthMetric(name string, v ir.Value, ts uint64) (Metric, error) {
 	tmplRef := ""
 	if v.Kind == ir.TypeStruct && v.Struct != nil {
@@ -116,6 +129,7 @@ func (n *Node) birthMetric(name string, v ir.Value, ts uint64) (Metric, error) {
 		return Metric{}, err
 	}
 	m.Timestamp = ts
+	attachMeta(&m, name, n.rt.Meta())
 	n.known[name] = true
 	st := &rbeState{}
 	// gen 0: a birth has no store generation to hand on (it works from a
@@ -124,6 +138,29 @@ func (n *Node) birthMetric(name string, v ir.Value, ts uint64) (Metric, error) {
 	st.record(v, 0, timeFromMs(ts))
 	n.rbeState[name] = st
 	return m, nil
+}
+
+// attachMeta states a tag's documentation as birth properties: `unit:` as
+// engUnit and `desc:` as documentation — the keys Ignition and Cirrus Link
+// hosts map onto tag properties, so a host discovers them from the birth
+// instead of someone retyping them on the SCADA side. A template instance's
+// members are documented under their dotted path (`Motor1.Speed`), the same
+// key a manifest's tag-meta: uses. Births only: data messages carry no
+// properties (see collectChanged).
+func attachMeta(m *Metric, path string, meta map[string]runtime.TagMeta) {
+	if tm, ok := meta[path]; ok {
+		if tm.Unit != "" {
+			m.Properties = append(m.Properties, Property{PropEngUnit, tm.Unit})
+		}
+		if tm.Desc != "" {
+			m.Properties = append(m.Properties, Property{PropDocumentation, tm.Desc})
+		}
+	}
+	if t, ok := m.Value.(*Template); ok && t != nil {
+		for i := range t.Metrics {
+			attachMeta(&t.Metrics[i], path+"."+t.Metrics[i].Name, meta)
+		}
+	}
 }
 
 // partition splits the published metrics (RBE class != NoPublish) into

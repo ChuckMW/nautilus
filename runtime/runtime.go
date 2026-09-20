@@ -305,7 +305,7 @@ func New(o Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	if o, err = expandTags(o, types); err != nil {
+	if o, err = expandTags(o, types, unionGlobals(prog, tasks)); err != nil {
 		return nil, err
 	}
 
@@ -490,6 +490,25 @@ func (r *Runtime) Types() map[string]*ir.Type {
 	out := make(map[string]*ir.Type, len(r.types))
 	for name, t := range r.types {
 		out[name] = t
+	}
+	return out
+}
+
+// unionGlobals merges every program's bound PLC variables (Program.Globals
+// is the deep set, so a library block's VAR_EXTERNAL counts) with their
+// declared types — what
+// expandTags seeds an untyped tag's init against. Two programs declaring one
+// tag differently is `nautilus check`'s report to make; here the last wins,
+// as in Runtime.Globals.
+func unionGlobals(main *Program, tasks []*taskRun) map[string]*ir.Type {
+	out := map[string]*ir.Type{}
+	for name, t := range main.Globals() {
+		out[name] = t
+	}
+	for _, tr := range tasks {
+		for name, t := range tr.prog.Globals() {
+			out[name] = t
+		}
 	}
 	return out
 }

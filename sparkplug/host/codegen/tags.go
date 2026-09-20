@@ -62,6 +62,7 @@ func TagsYAML(m host.Manifest, skip []string) ([]byte, error) {
 			// member init: follows the member, not the enclosing template.
 			Init: typedInit(s.Init, s.Datatype),
 			Desc: s.Desc,
+			Unit: s.Unit,
 		})
 	}
 	for _, p := range skip {

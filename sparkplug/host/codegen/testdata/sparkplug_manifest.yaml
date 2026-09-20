@@ -49,6 +49,7 @@ tags:
       writable: false
       init: null
       desc: ""
+      unit: ""
     - name: W6_PLC1_Pump_SpeedSP
       node: W6
       device: PLC1
@@ -59,6 +60,7 @@ tags:
       writable: true
       init: null
       desc: ""
+      unit: ""
     - name: W6_Pump1
       node: W6
       device: ""
@@ -69,6 +71,7 @@ tags:
       writable: false
       init: null
       desc: ""
+      unit: ""
     - name: W6_Pump1_Speed
       node: W6
       device: ""
@@ -79,6 +82,7 @@ tags:
       writable: true
       init: null
       desc: ""
+      unit: ""
     - name: W6_Site_Name
       node: W6
       device: ""
@@ -89,6 +93,7 @@ tags:
       writable: false
       init: null
       desc: ""
+      unit: ""
     - name: W6_Skid_A
       node: W6
       device: ""
@@ -99,6 +104,7 @@ tags:
       writable: false
       init: null
       desc: ""
+      unit: ""
     - name: W6_Skid_A_Main_Run
       node: W6
       device: ""
@@ -109,6 +115,7 @@ tags:
       writable: true
       init: null
       desc: ""
+      unit: ""
     - name: W6_Well_LastSample
       node: W6
       device: ""
@@ -119,6 +126,7 @@ tags:
       writable: false
       init: null
       desc: ""
+      unit: ""
     - name: W6_Well_Level
       node: W6
       device: ""
@@ -129,6 +137,7 @@ tags:
       writable: false
       init: null
       desc: ""
+      unit: ""
     - name: W7_Pump1
       node: W7
       device: ""
@@ -139,6 +148,7 @@ tags:
       writable: false
       init: null
       desc: ""
+      unit: ""
     - name: W7_Pump1_Speed
       node: W7
       device: ""
@@ -149,6 +159,7 @@ tags:
       writable: true
       init: null
       desc: ""
+      unit: ""
     - name: W7_Well_Level
       node: W7
       device: ""
@@ -159,3 +170,4 @@ tags:
       writable: false
       init: null
       desc: ""
+      unit: ""

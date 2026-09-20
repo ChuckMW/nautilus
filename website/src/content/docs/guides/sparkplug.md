@@ -6,8 +6,10 @@ description: Expose a controller's tags to any Sparkplug-aware SCADA host — fa
 A `sparkplug:` section in `nautilus.yaml` republishes the controller's tag
 store as a **Sparkplug B edge node**. Any Sparkplug-aware host (Ignition,
 or anything else speaking spBv1.0) discovers the whole tag database from
-the node's birth certificate — names, types, and current values arrive as
-data, not as configuration you re-enter on the SCADA side.
+the node's birth certificate — names, types, current values, and each
+tag's `unit:` and `desc:` (as the `engUnit` and `documentation` metric
+properties Ignition maps onto tag properties, on template members too)
+arrive as data, not as configuration you re-enter on the SCADA side.
 
 ```yaml
 sparkplug:

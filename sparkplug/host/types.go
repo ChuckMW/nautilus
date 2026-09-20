@@ -184,11 +184,15 @@ type Binding struct {
 	// from scan one. Nil means the type zero.
 	Init any
 	// Desc is a human description of what this metric IS ("Well 6 raw span
-	// minimum"), carried from the --sites file's `desc:` into the generated
-	// tag file's `desc:`. It is what an alarm name's {desc} renders instead
-	// of the sanitized tag name, and what an HMI can label a control with.
-	// Empty when the source did not say — never invented.
+	// minimum"), carried from the --sites file's `desc:` — or from the
+	// birth's `documentation` property — into the generated tag file's
+	// `desc:`. It is what an alarm name's {desc} renders instead of the
+	// sanitized tag name, and what an HMI can label a control with. Empty
+	// when the source did not say — never invented.
 	Desc string
+	// Unit is the engineering unit ("°C", "gpm"), from the --sites file's
+	// `unit:` or the birth's `engUnit` property, into the tag file's `unit:`.
+	Unit string
 }
 
 // ── Driver ───────────────────────────────────────────────────────────────

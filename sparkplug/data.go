@@ -13,7 +13,15 @@ import (
 // when a new metric name appears (a metric must be in a birth before data).
 func (n *Node) scanAndPublish() {
 	n.mu.Lock()
-	if !n.born {
+	// Unborn — the broker is gone, or the node has not birthed yet — the
+	// tick still runs when store-and-forward is on and there has been a
+	// birth: every metric that birth introduced keeps sampling into the
+	// buffer, to replay as historical after the rebirth. That is the
+	// "buffers while the broker is unreachable" the option promises; before
+	// this the tick returned here and an outage was a hole in the historian.
+	// Before the first birth there is nothing a host could receive, so
+	// nothing to buffer.
+	if !n.born && !n.bufferingLocked() {
 		n.mu.Unlock()
 		return
 	}
@@ -22,48 +30,78 @@ func (n *Node) scanAndPublish() {
 		n.mu.Unlock()
 		return
 	}
-	deliverable := n.hostDeliverableLocked()
-
-	// Encode deliverable messages (assigning seq) under the lock.
-	type pub struct {
-		topic   string
-		payload []byte
-	}
-	var pubs []pub
-	if deliverable {
-		for _, m := range msgs {
-			if p, err := (Payload{Timestamp: m.ts, Seq: n.nextSeq(), Metrics: m.metrics}).Encode(); err == nil {
-				pubs = append(pubs, pub{m.topic, p})
-			}
-		}
-	}
+	// Deliverable = born, the primary host (if any) online, AND the
+	// transport up right now. born alone is not enough: it is cleared by
+	// paho's connection-lost handler, which runs only once paho has noticed
+	// the loss, and a tick that lands in that window used to hand its
+	// publish to a connection about to be torn down.
+	deliverable := n.born && n.hostDeliverableLocked() && n.cli.IsConnectionOpen()
 	n.mu.Unlock()
 
 	for _, e := range deviceEvents {
 		e(n) // DBIRTH/DDEATH, self-locking
 	}
 
-	if !deliverable {
-		if n.sf != nil {
-			for _, m := range msgs {
-				n.sf.enqueue(m)
-			}
+	// Backlog first (marked historical), then live, so the host sees history
+	// then current; seq is assigned at publish time, in that wire order. The
+	// first message that does not go out ends the tick: it and everything
+	// after it is buffered when store-and-forward is on, dropped otherwise.
+	// A QoS 0 publish that timed out is a lost sample, not a reason to stop
+	// ticking — the next tick tries again, and the reconnect that a dead link
+	// leads to births afresh.
+	if deliverable {
+		deliverable = n.drainStoreForward()
+	}
+	if deliverable {
+		sent, _ := n.publishRecords(msgs)
+		msgs = msgs[sent:]
+	}
+	if n.sf != nil {
+		for _, m := range msgs {
+			n.sf.enqueue(m)
 		}
-		return
 	}
+}
 
-	// Deliverable: replay any backlog (marked historical) before live data so
-	// the host sees history then current.
-	n.drainStoreForward()
-	for _, p := range pubs {
-		n.cli.Publish(p.topic, 0, false, p.payload).Wait()
-	}
-	if len(pubs) > 0 {
+// publishRecords publishes data records in order, one seq each, and returns
+// how many went out. It stops at the first that did not: that record's seq
+// is handed back (unsentSeq) so the next message reuses it and the host sees
+// no gap — the record was never on the wire, or the link is dead and a birth
+// is coming either way.
+func (n *Node) publishRecords(recs []sfRecord) (sent int, ok bool) {
+	for i, r := range recs {
 		n.mu.Lock()
-		n.msgs += uint64(len(pubs))
+		seq := n.nextSeq()
+		births := n.births
+		p, err := Payload{Timestamp: r.ts, Seq: seq, Metrics: r.metrics}.Encode()
+		if err != nil {
+			n.unsentSeq(seq, births)
+		}
+		n.mu.Unlock()
+		if err != nil {
+			n.log.Warn("sparkplug: encode", "topic", r.topic, "error", err)
+			continue // not a link problem; nothing to retry
+		}
+		if err := n.publish(r.topic, 0, false, p); err != nil {
+			n.mu.Lock()
+			n.unsentSeq(seq, births)
+			n.mu.Unlock()
+			n.log.Warn("sparkplug: publish not sent", "topic", r.topic, "error", err)
+			return i, false
+		}
+		n.mu.Lock()
+		n.msgs++
 		n.lastPubMs = int64(nowMs())
 		n.mu.Unlock()
 	}
+	return len(recs), true
+}
+
+// bufferingLocked reports whether an unborn node should still sample: it
+// has store-and-forward, and a birth has told a host which metrics exist.
+// Caller holds n.mu.
+func (n *Node) bufferingLocked() bool {
+	return n.sf != nil && len(n.known) > 0
 }
 
 // publishPassLocked is the CPU half of one publish tick: sample the tag
@@ -73,6 +111,11 @@ func (n *Node) scanAndPublish() {
 // DBIRTH/DDEATH closures to run after the lock is released, and rebirth=true
 // when a rebirth was scheduled instead — in which case the caller publishes
 // nothing this tick. Caller holds n.mu.
+//
+// Unborn (buffering for store-and-forward), the pass only samples: a metric
+// that appeared since the last birth waits for the reconnect's birth rather
+// than scheduling a rebirth into a dead connection, and device health is
+// left alone — the next birth re-evaluates every device.
 //
 // Split out of scanAndPublish so the pass can be benchmarked without a
 // broker: everything above the MQTT seam is here.
@@ -93,19 +136,21 @@ func (n *Node) publishPassLocked(now time.Time) (msgs []sfRecord, deviceEvents [
 	// its DBIRTH covers them on the health transition — and rebirthing for
 	// them would storm empty births the whole time the device is down
 	// (e.g. every startup, while the field driver is still connecting).
-	for _, name := range n.pubNames {
-		if n.known[name] {
-			continue // already birthed — the overwhelmingly common case
+	if n.born {
+		for _, name := range n.pubNames {
+			if n.known[name] {
+				continue // already birthed — the overwhelmingly common case
+			}
+			if dev, owned := n.tagOwner[name]; owned && dev != "" && !n.devHealth[dev] {
+				continue
+			}
+			n.scheduleRebirthLocked()
+			return nil, nil, true
 		}
-		if dev, owned := n.tagOwner[name]; owned && dev != "" && !n.devHealth[dev] {
-			continue
-		}
-		n.scheduleRebirthLocked()
-		return nil, nil, true
-	}
 
-	// Device health transitions.
-	deviceEvents = n.deviceHealthLocked(snap)
+		// Device health transitions.
+		deviceEvents = n.deviceHealthLocked(snap)
+	}
 
 	// Collect changed metrics per destination.
 	nodeChanged := n.collectChanged(snap, now, "")
@@ -146,9 +191,11 @@ func (n *Node) hostDeliverableLocked() bool {
 
 // drainStoreForward replays a bounded batch of buffered messages as historical
 // data. Rate-limited per call so a large backlog trickles rather than floods.
-func (n *Node) drainStoreForward() {
+// It reports whether the link took everything it was given; on a failure the
+// undelivered records go back to the front of the buffer, in order.
+func (n *Node) drainStoreForward() bool {
 	if n.sf == nil || n.sf.len() == 0 {
-		return
+		return true
 	}
 	const batch = 50 // messages per publish tick
 	recs := n.sf.drainBatch(batch)
@@ -156,16 +203,16 @@ func (n *Node) drainStoreForward() {
 		for i := range r.metrics {
 			r.metrics[i].IsHistorical = true
 		}
-		n.mu.Lock()
-		p, err := Payload{Timestamp: r.ts, Seq: n.nextSeq(), Metrics: r.metrics}.Encode()
-		n.mu.Unlock()
-		if err == nil {
-			n.cli.Publish(r.topic, 0, false, p).Wait()
-		}
+	}
+	sent, ok := n.publishRecords(recs)
+	if !ok {
+		n.sf.requeue(recs[sent:])
+		return false
 	}
 	if left := n.sf.len(); left > 0 {
 		n.log.Info("sparkplug: store-forward draining", "remaining", left)
 	}
+	return true
 }
 
 // refreshShapeLocked rebuilds the tick-invariant tables — which tags publish
@@ -286,7 +333,10 @@ func (n *Node) publishDeviceBirth(d Device) {
 	if err != nil {
 		return
 	}
-	n.cli.Publish(n.deviceTopic("DBIRTH", d.ID), 0, false, p).Wait()
+	if err := n.publish(n.deviceTopic("DBIRTH", d.ID), 0, false, p); err != nil {
+		n.log.Warn("sparkplug: DBIRTH not sent", "device", d.ID, "error", err)
+		return
+	}
 	n.log.Info("sparkplug: device birth", "device", d.ID, "metrics", len(ms))
 }
 
@@ -298,7 +348,10 @@ func (n *Node) publishDeviceDeath(id string) {
 	if err != nil {
 		return
 	}
-	n.cli.Publish(n.deviceTopic("DDEATH", id), 0, false, p).Wait()
+	if err := n.publish(n.deviceTopic("DDEATH", id), 0, false, p); err != nil {
+		n.log.Warn("sparkplug: DDEATH not sent", "device", id, "error", err)
+		return
+	}
 	n.log.Info("sparkplug: device death", "device", id)
 }
 

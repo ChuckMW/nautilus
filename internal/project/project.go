@@ -771,9 +771,13 @@ func applyTagMeta(defs []runtime.TagDef, tm map[string]MetaConfig) map[string]ru
 	return out
 }
 
-// normalize maps yaml's integer literals onto the float64 the tag store
-// expects for numerics (yaml decodes 65 as int, 65.0 as float64; ST REAL
-// tags want the latter). BOOL and string pass through.
+// normalize maps yaml's integer literals onto float64 (yaml decodes 65 as
+// int, 65.0 as float64). BOOL and string pass through. This is only the
+// fallback shape: runtime.expandTags seeds a scalar tag against the type the
+// programs declare it as (VAR_EXTERNAL), and ir.SeedFromInit turns an
+// integral float back into an INT there — so `init: 0` on a `Counter : DINT`
+// seeds an integer, and only a tag no program declares seeds a REAL from a
+// number.
 //
 // It does NOT recurse into a struct tag's nested init map: a member's
 // target kind (REAL vs INT vs BOOL) is only known once the tag's `type:`
