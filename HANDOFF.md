@@ -2,7 +2,7 @@
 
 Working notes for picking up development in a fresh session. See `README.md`
 for the vision/architecture and `RELEASING.md` for the release pipeline; this
-file is the practical state + next steps. Last refreshed: 2026-09-13.
+file is the practical state + next steps. Last refreshed: 2026-09-19.
 
 ## What this is
 
@@ -24,11 +24,13 @@ nautilus; copy/adapt from it.
 - **CI only runs on pushes to main and on PRs.** A long-lived branch with no
   PR gets zero CI — open the PR early. (This bit the acceptance-testing
   branch: 23 commits accumulated with a red test suite nobody saw.)
-- **State on 2026-09-10:** PRs #1–#7 are merged; `main` carries everything
-  below. Artifacts: CLI **v0.9.1**, extension **0.9.27**, HMI **0.6.0**. The
-  Modbus stack (PRs #8 and #9) is on main as of 2026-09-13; the
-  `demo-integration` worktree (`~/Development/joyautomation/nautilus-demo`)
-  is the only branch still off main, and only for the demo build.
+- **State on 2026-09-19:** PRs #1–#9 and #11 are merged; `main` carries
+  everything below. Artifacts: CLI **v0.9.2**, extension **0.9.27**, HMI
+  **0.6.0**. PR #10 (`diff-revisions`: diagram diffs between git revisions,
+  carries the extension 0.9.28 bump) is open. The `demo-integration` worktree
+  (`~/Development/joyautomation/nautilus-demo`) is the only other branch off
+  main, and only for the demo build (its one net diff, a Modbus case in
+  `driverHealth`, still wants cherry-picking to main).
 - Releases: see `RELEASING.md`. CLI ships on `v*` tags (GoReleaser);
   extension + HMI publish-on-bump from main (`publish.yml`); `version-sync`
   in CI fails any push where a registry is ahead of the repo. Extension
@@ -111,6 +113,15 @@ website/, docs/      docs site (deploys from main); design briefs in docs/design
   `(*Clients).Delete` lock under the parallel suite; the package passes alone
   in ~13 s and a rerun passed). Run full suites with `-timeout 240s` so a hang
   costs four minutes, and rerun before diagnosing.
+- **paho never completes a QoS 0 publish token issued on a connection that
+  is then torn down**, and it can lose and re-establish the connection inside
+  any sane timeout — so `IsConnectionOpen()` is the wrong question for a
+  pending token. Every publish in `sparkplug/` goes through `Node.publish`
+  (bounded by `tokenTimeout` AND a per-connection lost signal the
+  connection-lost handler closes); never call `.Wait()` on a token there.
+  `scripts/repro-sparkplug-silent-link.sh` (SIGSTOP the node past the
+  keepalive) is the end-to-end check; closing a socket does NOT reproduce it.
+  Full story: `docs/handover/2026-09-19-sparkplug-edge-findings.md`.
 - **The extension's Marketplace upload in `publish.yml` can time out**
   (`Request timeout: /_apis/gallery`, twice on 2026-09-10). It is transient:
   `gh run rerun <id> --failed` published cleanly. The Open VSX step is skipped
@@ -307,6 +318,24 @@ Released as **v0.9.0** (Modbus, tagged one commit early) and **v0.9.1**
 (drivers:); CLI v0.8.0 → v0.9.1 is the jump that adds `nautilus modbus`. Not done: a run against real hardware (checklist
 below), and `nautilus modbus serve --from <url>` (feed the bench slave from a
 running controller's /api/state so a sim project drives the "devices").
+
+Done 2026-09-19 (PR #11, **v0.9.2**): the Sparkplug edge findings from the
+Mantle-for-Ignition integration suite (`~/Development/joyautomation/ignition`,
+`integration/`; it builds nautilus from this checkout). (1) A silent link —
+SIGSTOP past the keepalive — wedged the publish goroutine forever in an
+unbounded paho `Wait()`; every token wait is now bounded through
+`Node.publish` with a per-connection lost signal, no publish while the
+transport is down, seq assigned at publish time in wire order (a message
+that did not go out hands its number back; this also fixed a seq inversion
+on every store-and-forward drain), a failed tick's messages buffered when
+store-and-forward is on. (2) An untyped manifest tag's `init:` seeds as the
+type the program's `VAR_EXTERNAL` declares — `init: 0` on a DINT births as
+Int64, not Double. (3) N/DBIRTH metrics carry `engUnit`/`documentation`
+from `unit:`/`desc:` (template members under their dotted path); the
+decoder keeps properties and `nautilus sparkplug import` fills `unit:`/
+`desc:` from a live birth. (4) Store-and-forward now buffers across a broker
+outage, not only a primary-host outage. Handover + Outcome:
+`docs/handover/2026-09-19-sparkplug-edge-findings.md`. Content idea N-34.
 
 Next, in rough priority:
 
