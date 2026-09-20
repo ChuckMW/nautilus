@@ -75,6 +75,17 @@ Picking a role, by use case:
 | your logic owns across scans (integrator)   | `State(name, initial, …)`    | the seed, then the coil                     |
 | the HMI watches but the field never sees    | plain coil write — no entry  | the program creates it on first write       |
 
+## A scalar seed takes the program's type
+
+An `init:` on a plain (untyped) tag is seeded as whatever the programs
+declare that tag to be. `init: 0` on a tag the logic binds as
+`Counter : DINT` seeds an integer, and the node births it to a Sparkplug
+host as an `Int64`; `init: 65` on `TempSP : REAL` is still a REAL (a
+`Double` on the wire), so an integer literal is fine wherever a REAL is
+meant. A value the declared type cannot hold — `init: 2.5` on an `INT` —
+is a load error naming the tag and the type. A tag no program declares has
+nothing to resolve against and seeds a number as a REAL, as it always has.
+
 ## Seeding struct members
 
 A manifest tag naming a UDT (`type: Motor1Speed`) seeds to the zero of that

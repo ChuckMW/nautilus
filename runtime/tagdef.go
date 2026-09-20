@@ -127,7 +127,15 @@ func Typed(name string, role TagRole, typeName string, opts ...TagOpt) TagDef {
 // member still takes the zero of its own type. An unknown member name or a
 // scalar Init against a struct type is a load error naming the tag and the
 // member path.
-func expandTags(o Options, types map[string]*ir.Type) (Options, error) {
+//
+// An UNTYPED tag's Init takes its kind from the programs: globals maps each
+// tag a program binds (VAR_EXTERNAL, including a library block's) to its
+// declared type, and a scalar declared there — BOOL, INT, REAL, STRING —
+// converts the init the way a struct member's does. So `init: 0` on a tag
+// the logic declares `Counter : DINT` seeds an integer (and births as one),
+// while `init: 65` on `TempSP : REAL` is still a REAL. A tag no program
+// declares keeps the raw init, as before: a number seeds a REAL.
+func expandTags(o Options, types, globals map[string]*ir.Type) (Options, error) {
 	if len(o.Tags) == 0 {
 		return o, nil
 	}
@@ -170,6 +178,14 @@ func expandTags(o Options, types map[string]*ir.Type) (Options, error) {
 			}
 			seed[d.Name] = v
 		case d.Init != nil:
+			if t := scalarGlobal(globals, d.Name); t != nil {
+				v, err := ir.SeedFromInit(t, d.Init)
+				if err != nil {
+					return o, fmt.Errorf("tag %s (declared %s by a program): %w", d.Name, t.String(), err)
+				}
+				seed[d.Name] = v
+				break
+			}
 			seed[d.Name] = d.Init
 		case d.Type != "":
 			t, ok := types[d.Type]
@@ -188,6 +204,22 @@ func expandTags(o Options, types map[string]*ir.Type) (Options, error) {
 	}
 	o.Inputs, o.Outputs, o.Seed, o.Meta = inputs, outputs, seed, meta
 	return o, nil
+}
+
+// scalarGlobal returns the type a program declares tag name as, when that
+// is one of the kinds an init: can seed (BOOL, INT, REAL, STRING); nil
+// otherwise. A struct-typed global is the `type:` path's business, and a
+// TIME or ARRAY has no init: literal form.
+func scalarGlobal(globals map[string]*ir.Type, name string) *ir.Type {
+	t := globals[name]
+	if t == nil {
+		return nil
+	}
+	switch t.Kind {
+	case ir.TypeBool, ir.TypeInt, ir.TypeReal, ir.TypeString:
+		return t
+	}
+	return nil
 }
 
 // knownTypes lists what the project does declare, so a misspelled type name
