@@ -233,3 +233,27 @@ You don't need the Ignition stack to fix or verify item 1. The repro script and 
 - The connection-lost handler and `onConnect` are both paho goroutines; paho spawns the reconnect and the
   lost handler back to back, so on a very fast reconnect the handler *could* run after the new session's
   birth and clear `born`. The new `IsConnectionOpen` gate does not cover that ordering. Not observed; noted.
+
+## Outcome (items 2 and 3, 2026-09-19)
+
+Both landed as their own commits on the same branch, after item 1; each can be taken or left.
+
+- **Item 2** (`manifest: an untyped tag's init seeds as the type the program declares it`). Option one from
+  the finding: `runtime.expandTags` takes the union of every program's bound globals (the deep set, so a
+  library block's `VAR_EXTERNAL` counts) and seeds a plain tag's `init:` through `ir.SeedFromInit` against
+  the scalar type declared there. `init: 0` on `Counter : DINT` seeds an integer and births as `Int64`;
+  `init: 65` on a REAL is still a Double; `init: 2.5` on an INT is a load error naming the tag and type; a
+  tag no program declares still seeds a number as a REAL. No manifest change; the loader's `normalize()`
+  is now only the fallback shape. Verified: four new tests in `internal/project`, `go test ./...`, and
+  every example's `nautilus check` + acceptance suite (the sparkplug-host example's `SitesOnline : INT`
+  now seeds as an INT and its suite still passes). The tag-model guide gained a paragraph.
+- **Item 3** (`sparkplug: births state unit and desc as engUnit/documentation properties`). `Metric` gains
+  `Properties`; the codec writes and reads a PropertySet (the decoder used to drop it — the codegen
+  comment about that is gone); births attach `engUnit`/`documentation` per tag from the runtime's meta,
+  template members under their dotted path; data messages carry none. The host side round-trips them:
+  `Binding`/`TagSpec` gain `Unit`, the broker import fills `desc`/`unit` from the birth (a member takes
+  its own `engUnit` when stated, else the metric's) into the generated tag file. Verified: codec and
+  birth tests over the fake client, a broker-path codegen test, `go test -race ./sparkplug/...`, the
+  whole repo, and the TCK edge-node profile (0 fail; pass counts vary run to run: 814/842/828). Not done:
+  `engLow`/`engHigh` — the tag meta has no range fields to source them from.
+- Nothing was pushed and no PR opened.
