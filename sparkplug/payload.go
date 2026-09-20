@@ -181,6 +181,8 @@ func decodeMetric(m *spb.Payload_Metric) Metric {
 		Timestamp: m.GetTimestamp(),
 		Datatype:  spb.DataType(m.GetDatatype()),
 		IsNull:    m.GetIsNull(),
+
+		IsHistorical: m.GetIsHistorical(),
 	}
 	switch v := m.GetValue().(type) {
 	case *spb.Payload_Metric_BooleanValue:

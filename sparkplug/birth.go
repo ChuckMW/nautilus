@@ -19,6 +19,8 @@ func (n *Node) birth() error {
 
 	n.mu.Lock()
 	n.seq = 0
+	n.births++
+	session := n.births
 	n.known = map[string]bool{}
 	n.rbeState = map[string]*rbeState{}
 
@@ -92,12 +94,22 @@ func (n *Node) birth() error {
 	bd := n.bdSeq // captured under the lock — Stop() may mutate n.bdSeq concurrently once unlocked
 	n.mu.Unlock()
 
-	// Publish outside the lock (paho tokens).
-	if tok := n.cli.Publish(n.topic("NBIRTH"), 0, false, nbirthPayload); tok.Wait() && tok.Error() != nil {
-		return tok.Error()
+	// Publish outside the lock (paho tokens). An NBIRTH that did not go out
+	// leaves the node unborn: data before a birth is a protocol error, and
+	// the reconnect that follows a dead link births again from onConnect.
+	// (Unless a later birth already owns n.born — hence the births check.)
+	if err := n.publish(n.topic("NBIRTH"), 0, false, nbirthPayload); err != nil {
+		n.mu.Lock()
+		if n.births == session {
+			n.born = false
+		}
+		n.mu.Unlock()
+		return err
 	}
 	for _, b := range births {
-		n.cli.Publish(n.deviceTopic("DBIRTH", b.device), 0, false, dbirthPayloads[b.device]).Wait()
+		if err := n.publish(n.deviceTopic("DBIRTH", b.device), 0, false, dbirthPayloads[b.device]); err != nil {
+			n.log.Warn("sparkplug: DBIRTH not sent", "device", b.device, "error", err)
+		}
 	}
 	n.log.Info("sparkplug: born", "group", n.cfg.GroupID, "node", n.cfg.EdgeNode,
 		"bdSeq", bd, "nodeMetrics", len(nodeTags), "devices", len(births))

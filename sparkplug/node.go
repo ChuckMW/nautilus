@@ -2,6 +2,7 @@ package sparkplug
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -97,9 +98,38 @@ type Node struct {
 
 	sf *storeForward // nil unless WithStoreForward
 
+	tokenTimeout time.Duration // bound on every MQTT token wait; tests shorten it
+	// lost is closed by connectionLost and replaced for the next connection.
+	// A publish captures it before issuing its token and waits on it too, so
+	// a token orphaned by a teardown is abandoned the moment paho reports the
+	// loss instead of at tokenTimeout.
+	lost chan struct{}
+	// births counts birth() completions. A publish that started before a
+	// birth and failed after it must not hand its seq back into the new
+	// sequence; the count is what tells the two apart.
+	births uint64
+
 	cancel context.CancelFunc
 	done   chan struct{}
 }
+
+const (
+	connectTimeout = 30 * time.Second
+	// tokenTimeout bounds every MQTT token wait in the edge node (the same
+	// bound sparkplug/host uses). A QoS 0 publish completes on the socket
+	// write, so a token still pending after this long belongs to a link that
+	// is dead, not slow.
+	tokenTimeout = 10 * time.Second
+)
+
+var (
+	// errPublishTimeout: the token neither completed nor failed within
+	// tokenTimeout.
+	errPublishTimeout = errors.New("sparkplug: publish timed out")
+	// errConnectionLost: paho reported the connection the token was issued on
+	// lost before the token completed.
+	errConnectionLost = errors.New("sparkplug: publish abandoned, connection lost")
+)
 
 // Option configures a Node.
 type Option func(*Node)
@@ -140,6 +170,9 @@ func New(rt *runtime.Runtime, cfg Config, opts ...Option) (*Node, error) {
 		known:     map[string]bool{},
 		devHealth: map[string]bool{},
 		tagOwner:  map[string]string{},
+
+		tokenTimeout: tokenTimeout,
+		lost:         make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(n)
@@ -204,18 +237,17 @@ func (n *Node) Start(ctx context.Context) error {
 		SetOrderMatters(true).
 		SetBinaryWill(willTopic, willPayload, 1, false).
 		SetOnConnectHandler(n.onConnect).
-		SetConnectionLostHandler(func(_ mqtt.Client, e error) {
-			n.mu.Lock()
-			n.born = false
-			n.mu.Unlock()
-			n.log.Warn("sparkplug: connection lost", "error", e)
-		})
+		SetConnectionLostHandler(n.connectionLost)
 	if n.cfg.Username != "" {
 		opts.SetUsername(n.cfg.Username).SetPassword(n.cfg.Password)
 	}
 
 	n.cli = mqtt.NewClient(opts)
-	if tok := n.cli.Connect(); tok.Wait() && tok.Error() != nil {
+	tok := n.cli.Connect()
+	if !tok.WaitTimeout(connectTimeout) {
+		return fmt.Errorf("sparkplug: connect %s: timed out", n.cfg.BrokerURL)
+	}
+	if tok.Error() != nil {
 		return fmt.Errorf("sparkplug: connect %s: %w", n.cfg.BrokerURL, tok.Error())
 	}
 
@@ -247,7 +279,9 @@ func (n *Node) Stop() {
 	n.mu.Unlock()
 	if born && n.cli.IsConnected() {
 		if p, err := n.deathPayload(); err == nil {
-			n.cli.Publish(n.topic("NDEATH"), 1, false, p).Wait()
+			if err := n.publish(n.topic("NDEATH"), 1, false, p); err != nil {
+				n.log.Warn("sparkplug: NDEATH not confirmed", "error", err)
+			}
 		}
 	}
 	if n.cli != nil {
@@ -275,6 +309,20 @@ func (n *Node) onConnect(_ mqtt.Client) {
 	if err := n.birth(); err != nil {
 		n.log.Error("sparkplug: birth failed", "error", err)
 	}
+}
+
+// connectionLost is paho's connection-lost handler, run from a paho goroutine
+// once paho has noticed the loss — which can be long after the link actually
+// died, and (on a fast reconnect) barely before onConnect births again.
+// Besides clearing born it retires n.lost, which abandons any wait on a token
+// issued on the connection that just died.
+func (n *Node) connectionLost(_ mqtt.Client, e error) {
+	n.mu.Lock()
+	n.born = false
+	close(n.lost)
+	n.lost = make(chan struct{})
+	n.mu.Unlock()
+	n.log.Warn("sparkplug: connection lost", "error", e)
 }
 
 // beginInflight registers an in-flight birth/rebirth attempt and reports
@@ -308,11 +356,65 @@ func (n *Node) run(ctx context.Context) {
 	}
 }
 
+// publish issues one MQTT publish and waits for it, bounded. It returns nil
+// once the flow completed cleanly, the token's error if it completed with
+// one, errConnectionLost once paho reports the connection it was issued on
+// gone, and errPublishTimeout after tokenTimeout. Every publish in this
+// package comes through here.
+//
+// The connection-lost exit matters more than the bound. paho (1.5.1)
+// completes a QoS 0 publish token only when the packet is written to the
+// socket; a token handed to a connection that is then torn down is never
+// completed at all. A tick that waited on it with Wait() parked the publish
+// goroutine for good — the node reconnected, rebirthed from paho's own
+// goroutine, and never sent data again. And a plain WaitTimeout is not
+// enough either: paho can lose and re-establish the connection well inside
+// the bound (the repro script sees it within a second), after which the
+// connection is open and healthy while the orphaned token is still pending.
+// So the wait also watches the lost signal captured before the token was
+// issued.
+func (n *Node) publish(topic string, qos byte, retained bool, payload []byte) error {
+	n.mu.Lock()
+	lost := n.lost
+	n.mu.Unlock()
+	tok := n.cli.Publish(topic, qos, retained, payload)
+	timer := time.NewTimer(n.tokenTimeout)
+	defer timer.Stop()
+	select {
+	case <-tok.Done():
+		return tok.Error()
+	case <-lost:
+		// The connection went between the capture above and the publish,
+		// and the token may have completed on its successor: a completed
+		// token is the truth, and a message that did go out must not hand
+		// its seq back.
+		select {
+		case <-tok.Done():
+			return tok.Error()
+		default:
+			return errConnectionLost
+		}
+	case <-timer.C:
+		return errPublishTimeout
+	}
+}
+
 // nextSeq advances and returns the Sparkplug sequence number (0-255).
 // Caller holds n.mu.
 func (n *Node) nextSeq() uint64 {
 	n.seq = (n.seq + 1) % 256
 	return n.seq
+}
+
+// unsentSeq hands back the sequence number of a message that did not go out,
+// so the next message reuses it and the host sees no gap. It is a no-op if a
+// birth has restarted the sequence since the number was taken. Caller holds
+// n.mu.
+func (n *Node) unsentSeq(seq, births uint64) {
+	if n.births != births || n.seq != seq {
+		return
+	}
+	n.seq = (seq + 255) % 256
 }
 
 // ── bdSeq persistence ─────────────────────────────────────────────────────

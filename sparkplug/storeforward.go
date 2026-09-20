@@ -61,6 +61,21 @@ func (s *storeForward) drainBatch(n int) []sfRecord {
 	return out
 }
 
+// requeue puts records back at the front, in order, ahead of anything
+// buffered since: an interrupted drain hands back what it did not deliver.
+// The ring still holds: if that overflows max, the oldest go.
+func (s *storeForward) requeue(recs []sfRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	buf := make([]sfRecord, 0, len(recs)+len(s.buf))
+	buf = append(append(buf, recs...), s.buf...)
+	if over := len(buf) - s.max; over > 0 {
+		buf = buf[over:]
+		s.dropped += over
+	}
+	s.buf = buf
+}
+
 func (s *storeForward) len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
